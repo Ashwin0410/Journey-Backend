@@ -19,19 +19,7 @@ def db():
 
 @r.post("/api/journey/event")
 def log_event(x: JourneyEventIn, q: Session = Depends(db)):
-    """
-    Log a single Journey event (e.g. chills button press, insight moment, note).
 
-    Expected body:
-    {
-      "session_id": "...",
-      "event_type": "chills" | "insight" | "note" | ...,
-      "t_ms": 43210,
-      "user_hash": "optional",
-      "label": "optional short label",
-      "payload": { ... optional JSON payload ... }
-    }
-    """
     payload_json = None
     if x.payload is not None:
         payload_json = json.dumps(x.payload, ensure_ascii=False)
