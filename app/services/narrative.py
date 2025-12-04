@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 
-# Cooldown (in minutes) for Journey button lock
+
 DEFAULT_JOURNEY_COOLDOWN_MINUTES = 45
 
 
@@ -17,13 +17,7 @@ def compute_journey_state(
     user_hash: Optional[str],
     cooldown_minutes: int = DEFAULT_JOURNEY_COOLDOWN_MINUTES,
 ) -> Dict[str, Any]:
-    """
-    Simple rule-based state for the Journey button.
 
-    - If no user_hash or no sessions -> ready.
-    - If last session older than cooldown_minutes -> ready.
-    - Else -> cooldown with remaining minutes.
-    """
     if not user_hash:
         return {
             "status": "ready",
@@ -44,7 +38,7 @@ def compute_journey_state(
             "last_session_at": None,
         }
 
-    # normalise to naive UTC for subtraction
+    
     now = datetime.utcnow()
     last_dt = last.created_at
     if getattr(last_dt, "tzinfo", None) is not None:
@@ -86,11 +80,6 @@ def _first_name(full_name: Optional[str]) -> Optional[str]:
 
 
 def _pick_schema_label(db: Session, user_hash: str) -> Optional[str]:
-    """
-    Very simple rule:
-    - If we have recent Sessions with schema_hint, use that.
-    - Else, look at SchemaItemResponse and pick the highest score.
-    """
     last_session = (
         db.query(models.Sessions)
         .filter(models.Sessions.user_hash == user_hash)
@@ -100,7 +89,7 @@ def _pick_schema_label(db: Session, user_hash: str) -> Optional[str]:
     if last_session and last_session.schema_hint:
         return last_session.schema_hint
 
-    # fall back to intake schema items with highest score
+    
     item = (
         db.query(models.SchemaItemResponse)
         .filter(models.SchemaItemResponse.user_hash == user_hash)
@@ -116,9 +105,6 @@ def _pick_schema_label(db: Session, user_hash: str) -> Optional[str]:
 
 
 def _last_session_feedback(db: Session, user_hash: str) -> Dict[str, Any]:
-    """
-    Return info about the most recent session + feedback for this user.
-    """
     session = (
         db.query(models.Sessions)
         .filter(models.Sessions.user_hash == user_hash)
@@ -166,10 +152,6 @@ def _build_hero_narrative(
     mood: Optional[str],
     feedback: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """
-    Rule-based copy for the 'Hero Card' narrative on the Today screen.
-    No LLMs, just templates.
-    """
     name_piece = _first_name(user_name) or "you"
     schema_phrase = schema_label or "an old story about yourself"
     mood_phrase = mood or "mixed"
@@ -221,11 +203,6 @@ def _build_hero_narrative(
 
 
 def _pick_recommended_activity(db: Session) -> Optional[schemas.ActivityRecommendationOut]:
-    """
-    For V1 (no extra LLM here):
-    - Just pick the most recently created active Activity.
-    - This plugs into the Smart Activity Card with minimal logic.
-    """
     row = (
         db.query(models.Activities)
         .filter(models.Activities.is_active == True)
@@ -238,7 +215,7 @@ def _pick_recommended_activity(db: Session) -> Optional[schemas.ActivityRecommen
     tags: List[str] = []
     if row.tags_json:
         try:
-            import json  # local import to avoid top-level if unused
+            import json 
             tags = json.loads(row.tags_json) or []
         except Exception:
             tags = []
@@ -257,15 +234,10 @@ def _pick_recommended_activity(db: Session) -> Optional[schemas.ActivityRecommen
 
 
 def _extract_postal_code(db: Session, user_hash: Optional[str]) -> Optional[str]:
-    """
-    Try to read the latest postal_code from the user's intake.
-    IMPORTANT: use models.ClinicalIntake (the model that actually exists).
-    Return None safely if anything goes wrong.
-    """
     if not user_hash:
         return None
 
-    # Ensure the ORM model exists
+    
     if not hasattr(models, "ClinicalIntake"):
         return None
 
@@ -286,10 +258,7 @@ def _extract_postal_code(db: Session, user_hash: Optional[str]) -> Optional[str]
 
 
 def build_today_summary(db: Session, user: models.Users) -> schemas.TodaySummaryOut:
-    """
-    Build the full Today payload (Hero card + Journey state + one recommended activity).
-    Purely rule-based; no LLM calls.
-    """
+
     now = datetime.utcnow()
     greeting = _time_of_day_greeting(now)
     fname = _first_name(user.name)
@@ -298,7 +267,7 @@ def build_today_summary(db: Session, user: models.Users) -> schemas.TodaySummary
     else:
         greeting = f"{greeting}"
 
-    # Last session + feedback
+
     session_info = _last_session_feedback(db, user.user_hash)
     schema_label = _pick_schema_label(db, user.user_hash)
     hero_bits = _build_hero_narrative(
@@ -308,16 +277,15 @@ def build_today_summary(db: Session, user: models.Users) -> schemas.TodaySummary
         feedback=session_info.get("feedback"),
     )
 
-    # Journey button state
+    
     j_state = compute_journey_state(db, user.user_hash)
     journey_ready = j_state.get("status") == "ready"
     cooldown_remaining = int(j_state.get("cooldown_minutes_remaining", 0))
 
-    # Recommended activity (simple, rule-based)
+    
     rec_act = _pick_recommended_activity(db)
 
-    # 🔑 Supply postal_code so the frontend can pass it to the activity
-    # recommendation endpoint (and anything else that needs geo context).
+
     postal_code = _extract_postal_code(db, user.user_hash)
 
     return schemas.TodaySummaryOut(
