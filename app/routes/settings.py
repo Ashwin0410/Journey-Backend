@@ -29,9 +29,7 @@ def get_truth_profile(
     current_user: models.Users = Depends(get_current_user),
     q: Session = Depends(db),
 ):
-    """
-    Fetch the user's 'Truth Profile' / narrative bio from KV.
-    """
+
     key = _truth_profile_key(current_user.user_hash)
     row = q.query(models.KV).filter(models.KV.k == key).first()
 
@@ -55,9 +53,7 @@ def set_truth_profile(
     current_user: models.Users = Depends(get_current_user),
     q: Session = Depends(db),
 ):
-    """
-    Store / update the user's 'Truth Profile' as a simple blob in KV.
-    """
+
     key = _truth_profile_key(current_user.user_hash)
     row = q.query(models.KV).filter(models.KV.k == key).first()
     value = json.dumps({"bio": payload.bio})
