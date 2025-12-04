@@ -92,14 +92,11 @@ def submit_full_intake(
     current_user: models.Users = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """
-    Save the entire first-login intake flow for the current user.
-    """
+
 
     user = current_user
     user_hash = user.user_hash
 
-    # ------------------ CREATE INTAKE ROW ------------------
     intake = models.ClinicalIntake(
         user_hash=user_hash,
         age=payload.age,
@@ -127,7 +124,6 @@ def submit_full_intake(
     db.commit()
     db.refresh(intake)
 
-    # ------------------ SCHEMA RESPONSES ------------------
     for item in payload.schema_items:
         db.add(
             models.SchemaItemResponse(
@@ -140,7 +136,7 @@ def submit_full_intake(
             )
         )
 
-    # ------------------ PHQ-9 RESPONSES ------------------
+
     for item in payload.phq9_items:
         db.add(
             models.Phq9ItemResponse(
@@ -154,7 +150,7 @@ def submit_full_intake(
             )
         )
 
-    # ------------------ SAFETY + ONBOARDING FLAGS ------------------
+   
     total_score = sum(i.score for i in payload.phq9_items)
 
     q9_score = 0
@@ -169,7 +165,7 @@ def submit_full_intake(
     elif total_score >= 15:
         safety_flag = 1
 
-    # 🔥🔥🔥 CRITICAL FIX — MERGE USER INTO THIS SESSION 🔥🔥🔥
+
     user = db.merge(user)
 
     user.safety_flag = safety_flag
@@ -187,9 +183,7 @@ def get_my_intake(
     current_user: models.Users = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """
-    Return latest intake for this user.
-    """
+
     user_hash = current_user.user_hash
     intake = (
         db.query(models.ClinicalIntake)
