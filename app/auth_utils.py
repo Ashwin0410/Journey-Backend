@@ -22,10 +22,7 @@ def create_access_token(
     data: dict,
     expires_delta: Optional[timedelta] = None,
 ) -> str:
-    """
-    Create a signed JWT carrying at least {"sub": user_hash}.
-    Default expiry = 7 days.
-    """
+
     to_encode = data.copy()
     expire = datetime.utcnow() + (expires_delta or timedelta(days=7))
     to_encode.update({"exp": expire})
@@ -37,11 +34,7 @@ def get_current_user(
     authorization: str | None = Header(None, alias="Authorization"),
     db: Session = Depends(get_db),
 ) -> models.Users:
-    """
-    Simple Bearer token auth:
-    - Expect header: Authorization: Bearer <jwt>
-    - JWT payload must contain "sub" = user_hash.
-    """
+    
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
