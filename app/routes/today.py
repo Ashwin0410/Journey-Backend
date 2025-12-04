@@ -1,5 +1,3 @@
-# app/routes/today.py
-
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
@@ -26,12 +24,4 @@ def get_today_summary(
     current_user: models.Users = Depends(get_current_user),
     q: Session = Depends(db),
 ):
-    """
-    Home / Today payload for Felix's 'Today' screen.
-
-    - Greeting + date
-    - Hero narrative (state-of-mind card)
-    - Highlight terms (for Indigo styling)
-    - Journey button state (ready vs cooldown)
-    """
     return narrative.build_today_summary(q, current_user)
