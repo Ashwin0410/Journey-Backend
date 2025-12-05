@@ -5,8 +5,6 @@ from pathlib import Path
 from typing import List, Tuple, Optional
 
 
-
-
 DAY_TO_TRACK_FILES = {
     # Day 1: Felix wants Freedom as the very first experience
     1: ["Audiosocket_29006482_Fullscore_Freedom"],
@@ -23,7 +21,6 @@ DAY_TO_TRACK_FILES = {
     # Day 5: big trailer-style rise
     5: ["Audiosocket_29649772_Pat Andrews_The Battle for Freedom Trailer"],
 }
-
 
 
 MUSIC_TO_VOICES = {
@@ -50,15 +47,12 @@ MUSIC_TO_VOICES = {
 
 
 def _folder_key(folder: str) -> str:
-    
     f = (folder or "").strip().lower()
     # split on first space so "1. inception" → ["1.", "inception"]
     parts = f.split(" ", 1)
     if len(parts) == 2:
         return parts[1].strip()
     return f
-
-
 
 
 def load_index() -> dict:
@@ -73,7 +67,7 @@ def choose_folder(mood: str, schema: str) -> List[str]:
     mood = (mood or "").lower().strip()
     schema = (schema or "").lower().strip()
 
-    
+    # Schema-driven selection has priority
     if schema in {"failure", "subjugation"}:
         return ["1. inception"]
     if schema in {"unseen", "defectiveness", "abandonment"}:
@@ -100,7 +94,6 @@ def choose_folder(mood: str, schema: str) -> List[str]:
 
 
 def _find_track_by_basenames(idx: dict, names: List[str]) -> Optional[Tuple[str, str, str, str]]:
-    
     cand = {}
     for t in idx["tracks"]:
         bn = os.path.basename(t["path"])
@@ -123,7 +116,6 @@ def pick_track_by_day(idx: dict, day: int) -> Optional[Tuple[str, str, str, str]
 
 
 def pick_track(idx: dict, folders: List[str], recent_ids: List[str]) -> Tuple[str, str, str, str]:
-
     recent = set(recent_ids or [])
     candidates = [
         t for t in idx["tracks"]
@@ -139,15 +131,16 @@ def pick_track(idx: dict, folders: List[str], recent_ids: List[str]) -> Tuple[st
     return t["id"], abs_path, t["folder"], os.path.basename(t["path"])
 
 
-
-
 def pick_voice(folder: str, cfg, recent_voice: Optional[str] = None) -> str:
     key = _folder_key(folder)
 
-    
+    # Base pool for this music; default to interstellar pool if unknown
     voices = MUSIC_TO_VOICES.get(key) or MUSIC_TO_VOICES.get("interstellar", [])
 
-    
+    # 🔒 Hard-ban JJ so it’s never selected
+    voices = [v for v in voices if v != "9DY0k6JS3lZaUAIvDlAA"]
+
+    # If nothing left, fall back to configured voices (also filter JJ)
     if not voices:
         fallback = [
             getattr(cfg, "VOICE_INCEPTION_PRIMARY", None),
@@ -157,13 +150,13 @@ def pick_voice(folder: str, cfg, recent_voice: Optional[str] = None) -> str:
             getattr(cfg, "VOICE_THINK_PRIMARY", None),
             getattr(cfg, "VOICE_THINK_SECONDARY", None),
         ]
-        voices = [v for v in fallback if v]
+        voices = [v for v in fallback if v and v != "9DY0k6JS3lZaUAIvDlAA"]
 
     if not voices:
-        
+        # Final safety fallback
         return ""
 
-    
+    # Avoid immediate repeat if possible
     if recent_voice in voices and len(voices) > 1:
         pool = [v for v in voices if v != recent_voice]
     else:
