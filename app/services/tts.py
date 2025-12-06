@@ -1,18 +1,28 @@
 import io
 import re
+import time
 import tempfile
 from typing import List
 
 import requests
 from pydub import AudioSegment
+from requests.exceptions import ConnectionError, Timeout, RequestException
 
-
+# Split on sentence boundaries so each chunk stays under ElevenLabs' input cap
 _SENTENCE_SPLIT_RE = re.compile(r'(?<=[\.\!\?])\s+')
 _PAUSE_TOKEN = "[pause]"
 _PAUSE_SENTINEL = "<<<PAUSE>>>"
 
+# ElevenLabs sometimes gets unstable with huge chunks.
+# 4600 is near the upper limit – we can be a bit more conservative.
+DEFAULT_MAX_CHARS = 3200
 
-def _split_text_into_chunks(text: str, max_chars: int = 4600) -> List[str]:
+
+def _split_text_into_chunks(text: str, max_chars: int = DEFAULT_MAX_CHARS) -> List[str]:
+    """
+    Split the script into <= max_chars chunks on sentence boundaries.
+    Long single sentences are hard-split if needed.
+    """
     text = text.strip()
     if len(text) <= max_chars:
         return [text]
@@ -46,35 +56,137 @@ def _split_text_into_chunks(text: str, max_chars: int = 4600) -> List[str]:
     return chunks
 
 
-def _synth_chunk(text: str, voice_id: str, key: str) -> AudioSegment:
+def _synth_chunk(
+    text: str,
+    voice_id: str,
+    key: str,
+    *,
+    timeout: int = 120,
+    max_retries: int = 3,
+    backoff_base: float = 1.5,
+) -> AudioSegment:
+    """
+    Synthesize a single chunk and return it as a pydub AudioSegment.
+
+    Adds retry logic around transient network / server issues:
+    - ConnectionError
+    - Timeout
+    - HTTP 5xx
+    - HTTP 429 (rate limiting)
+    """
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream"
     headers = {
         "xi-api-key": key,
         "accept": "audio/mpeg",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
     payload = {
-
+        # [pause]/[breath] are stripped or pre-processed BEFORE this stage.
         "text": text,
         "model_id": "eleven_multilingual_v2",
         "voice_settings": {
             "stability": 0.5,
             "similarity_boost": 0.7,
             "style": 0.3,
-            "use_speaker_boost": True
-        }
+            "use_speaker_boost": True,
+        },
     }
-    r = requests.post(url, headers=headers, json=payload, stream=True, timeout=180)
-    r.raise_for_status()
-    buf = io.BytesIO()
-    for c in r.iter_content(16384):
-        if c:
-            buf.write(c)
-    buf.seek(0)
-    return AudioSegment.from_file(buf, format="mp3")
+
+    last_exc: Exception | None = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            # You *can* experiment with stream=False if streaming is flaky:
+            # r = requests.post(url, headers=headers, json=payload, timeout=timeout)
+            r = requests.post(
+                url,
+                headers=headers,
+                json=payload,
+                stream=True,
+                timeout=timeout,
+            )
+
+            # Handle HTTP-level issues explicitly
+            if r.status_code in (429, 500, 502, 503, 504):
+                # These are typically transient / rate-limit / server errors.
+                last_exc = RequestException(
+                    f"ElevenLabs HTTP {r.status_code} while synthesising chunk."
+                )
+                # Only retry if we have attempts left
+                if attempt < max_retries:
+                    sleep_s = backoff_base ** attempt
+                    print(
+                        f"[TTS] Transient HTTP error {r.status_code}. "
+                        f"Retrying attempt {attempt}/{max_retries} after {sleep_s:.1f}s..."
+                    )
+                    time.sleep(sleep_s)
+                    continue
+                else:
+                    r.raise_for_status()
+
+            # If non-200 and not in the retry list, this will raise HTTPError
+            r.raise_for_status()
+
+            # If we get here, we have a good response; stream into buffer
+            buf = io.BytesIO()
+            for c in r.iter_content(16384):
+                if c:
+                    buf.write(c)
+            buf.seek(0)
+            return AudioSegment.from_file(buf, format="mp3")
+
+        except (ConnectionError, Timeout) as e:
+            # This is where your original "RemoteDisconnected" lives
+            last_exc = e
+            if attempt < max_retries:
+                sleep_s = backoff_base ** attempt
+                print(
+                    f"[TTS] Network issue ({type(e).__name__}: {e}). "
+                    f"Retrying attempt {attempt}/{max_retries} after {sleep_s:.1f}s..."
+                )
+                time.sleep(sleep_s)
+                continue
+            else:
+                print(
+                    f"[TTS] Network issue after {max_retries} attempts. "
+                    f"Giving up on this chunk."
+                )
+                raise
+
+        except RequestException as e:
+            # Any other requests-related errors (including HTTPError from raise_for_status)
+            last_exc = e
+            if attempt < max_retries:
+                sleep_s = backoff_base ** attempt
+                print(
+                    f"[TTS] RequestException ({type(e).__name__}: {e}). "
+                    f"Retrying attempt {attempt}/{max_retries} after {sleep_s:.1f}s..."
+                )
+                time.sleep(sleep_s)
+                continue
+            else:
+                print(
+                    f"[TTS] RequestException after {max_retries} attempts. "
+                    f"Giving up on this chunk."
+                )
+                raise
+
+    # In theory we should never get here because we either return or raise
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Unknown TTS error; no exception captured but chunk failed.")
 
 
-def synth(text: str, voice_id: str, key: str, max_chars: int = 4600) -> str:
+def synth(text: str, voice_id: str, key: str, max_chars: int = DEFAULT_MAX_CHARS) -> str:
+    """
+    Chunk long scripts, synth each chunk, stitch, and return a temp WAV path.
+
+    We treat "[pause]" as a request for a slightly longer-than-normal silence
+    by inserting explicit silent gaps between blocks.
+
+    Additionally, we insert short gaps between synthesized chunks so the flow
+    feels less like continuous talking and more like natural phrasing.
+    """
     raw = (text or "").strip()
     if not raw:
         # Return a 1s silent WAV if something odd happens
@@ -83,10 +195,10 @@ def synth(text: str, voice_id: str, key: str, max_chars: int = 4600) -> str:
         silent.export(f.name, format="wav")
         return f.name
 
-
+    # Convert [breath] to nothing (small prosody change is fine)
     raw = raw.replace("[breath]", " ")
 
-
+    # Mark pauses with a sentinel so we can split and inject silence
     raw = raw.replace(_PAUSE_TOKEN, f" {_PAUSE_SENTINEL} ")
 
     blocks = [b.strip() for b in raw.split(_PAUSE_SENTINEL) if b.strip()]
@@ -97,20 +209,34 @@ def synth(text: str, voice_id: str, key: str, max_chars: int = 4600) -> str:
         return f.name
 
     segs: List[AudioSegment] = []
-    PAUSE_MS = 900  
-    CHUNK_GAP_MS = 350
+    PAUSE_MS = 900          # ~0.9s of silence for [pause]
+    CHUNK_GAP_MS = 350      # ~0.35s between chunks for more natural pacing
 
     for block_idx, block in enumerate(blocks):
         parts = _split_text_into_chunks(block, max_chars=max_chars)
         for j, p in enumerate(parts):
+            print(
+                f"[TTS] Synthesising block {block_idx + 1}/{len(blocks)}, "
+                f"chunk {j + 1}/{len(parts)}, len={len(p)} chars"
+            )
             segs.append(_synth_chunk(p, voice_id, key))
-           
+            # Short gap between chunks inside the same block
             if j < len(parts) - 1:
-                segs.append(AudioSegment.silent(duration=CHUNK_GAP_MS, frame_rate=44100))
+                segs.append(
+                    AudioSegment.silent(
+                        duration=CHUNK_GAP_MS,
+                        frame_rate=44100,
+                    )
+                )
 
-        
+        # Longer pause when the script explicitly used [pause]
         if block_idx < len(blocks) - 1:
-            segs.append(AudioSegment.silent(duration=PAUSE_MS, frame_rate=44100))
+            segs.append(
+                AudioSegment.silent(
+                    duration=PAUSE_MS,
+                    frame_rate=44100,
+                )
+            )
 
     full = segs[0]
     for s in segs[1:]:
