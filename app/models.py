@@ -33,15 +33,10 @@ class Feedback(Base):
     relevance = Column(Integer)
     emotion_word = Column(String)
 
-    # Post-session questionnaire fields
-    chills_option = Column(String, nullable=True)   # "yes", "subtle", "no"
-    chills_detail = Column(Text, nullable=True)     # What sparked that moment?
-    session_insight = Column(Text, nullable=True)   # Any insights from this session?
-    meta_json = Column(Text, nullable=True)         # Extra metadata if needed
-    
-    # ISSUE 4 & 5: JSON array of timestamps (in seconds) when user pressed chills button
-    # Stored as JSON string, e.g. "[45.2, 120.5, 185.3]"
-    chills_moments_json = Column(Text, nullable=True)
+    chills_option = Column(String, nullable=True)  
+    chills_detail = Column(Text, nullable=True)     
+    session_insight = Column(Text, nullable=True)   
+    meta_json = Column(Text, nullable=True)         
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
