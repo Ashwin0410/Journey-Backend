@@ -1,3 +1,4 @@
+
 from typing import List, Optional, Dict, Any
 from datetime import date, datetime
 
@@ -44,13 +45,10 @@ class FeedbackIn(BaseModel):
     relevance: int = Field(ge=1, le=5)
     emotion_word: str
 
-    # Post-session questionnaire fields
-    chills_option: str | None = None      # "yes", "subtle", "no"
-    chills_detail: str | None = None      # What sparked that moment?
-    session_insight: str | None = None    # Any insights from this session?
     
-    # ISSUE 4 & 5: Array of timestamps (in seconds) when user pressed chills button
-    chills_moments: List[float] | None = None
+    chills_option: str | None = None      
+    chills_detail: str | None = None      
+    session_insight: str | None = None    
 
 
 
