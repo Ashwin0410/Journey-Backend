@@ -157,7 +157,7 @@ def _build_hero_narrative(
     mood_phrase = mood or "mixed"
 
     base = (
-        f"You're quietly collecting evidence that you're more than {schema_phrase}. "
+        f"You’re quietly collecting evidence that you’re more than {schema_phrase}. "
         f"Even on {mood_phrase} days, the fact that {name_piece} keeps showing up "
         "is proof of agency, not failure."
     )
@@ -184,7 +184,7 @@ def _build_hero_narrative(
     else:
         text = (
             base
-            + " You're building a track record of small, boring, solid evidence that you can move "
+            + " You’re building a track record of small, boring, solid evidence that you can move "
               "through this, one step at a time."
         )
 
@@ -288,13 +288,10 @@ def build_today_summary(db: Session, user: models.Users) -> schemas.TodaySummary
 
     postal_code = _extract_postal_code(db, user.user_hash)
 
-    # FIX: Default journey_day to 1 if NULL (new user who hasn't completed a session yet)
-    journey_day = user.journey_day if user.journey_day is not None else 1
-
     return schemas.TodaySummaryOut(
         greeting=greeting,
         current_date=now.date(),
-        journey_day=journey_day,
+        journey_day=user.journey_day,
         hero_narrative=hero_bits["hero_narrative"],
         highlight_terms=hero_bits["highlight_terms"],
         has_recent_session=bool(session_info.get("has_session")),
