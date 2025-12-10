@@ -216,7 +216,7 @@ class IntakeFullIn(BaseModel):
 
     
     weekly_plan: WeeklyPlanIn
-    good_life_answer: str
+    good_life_answer: str | None = None
 
 
 class IntakeFullOut(BaseModel):
