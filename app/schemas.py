@@ -1,4 +1,3 @@
-
 from typing import List, Optional, Dict, Any
 from datetime import date, datetime
 
@@ -216,7 +215,9 @@ class IntakeFullIn(BaseModel):
 
     
     weekly_plan: WeeklyPlanIn
-    good_life_answer: str
+    
+    # CHANGED: Made optional to hide 90-year-old question (Issue 5)
+    good_life_answer: Optional[str] = None
 
 
 class IntakeFullOut(BaseModel):
