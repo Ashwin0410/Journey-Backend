@@ -177,48 +177,7 @@ def _synth_chunk(
     raise RuntimeError("Unknown TTS error; no exception captured but chunk failed.")
 
 
-# ADDED: Helper function to trim audio to max duration (Issue 9)
-def trim_audio_to_duration(audio: AudioSegment, max_duration_ms: int, fade_out_ms: int = 500) -> AudioSegment:
-    """
-    Trim audio to fit within max_duration_ms if it exceeds that length.
-    Applies a fade-out at the end for smooth cutoff.
-    
-    Args:
-        audio: The AudioSegment to potentially trim
-        max_duration_ms: Maximum allowed duration in milliseconds
-        fade_out_ms: Duration of fade-out effect in milliseconds
-    
-    Returns:
-        Trimmed AudioSegment (or original if within limit)
-    """
-    current_duration = len(audio)
-    
-    if current_duration <= max_duration_ms:
-        # No trimming needed
-        return audio
-    
-    print(
-        f"[TTS] Audio duration ({current_duration}ms) exceeds max ({max_duration_ms}ms). "
-        f"Trimming with {fade_out_ms}ms fade-out."
-    )
-    
-    # Trim to max duration
-    trimmed = audio[:max_duration_ms]
-    
-    # Apply fade-out for smooth ending
-    if fade_out_ms > 0 and len(trimmed) > fade_out_ms:
-        trimmed = trimmed.fade_out(fade_out_ms)
-    
-    return trimmed
-
-
-def synth(
-    text: str, 
-    voice_id: str, 
-    key: str, 
-    max_chars: int = DEFAULT_MAX_CHARS,
-    max_duration_ms: int | None = None,  # ADDED: Optional max duration parameter (Issue 9)
-) -> str:
+def synth(text: str, voice_id: str, key: str, max_chars: int = DEFAULT_MAX_CHARS) -> str:
     """
     Chunk long scripts, synth each chunk, stitch, and return a temp WAV path.
 
@@ -227,13 +186,6 @@ def synth(
 
     Additionally, we insert short gaps between synthesized chunks so the flow
     feels less like continuous talking and more like natural phrasing.
-    
-    Args:
-        text: The script text to synthesize
-        voice_id: ElevenLabs voice ID
-        key: ElevenLabs API key
-        max_chars: Maximum characters per chunk
-        max_duration_ms: Optional maximum duration - if set, audio will be trimmed to fit
     """
     raw = (text or "").strip()
     if not raw:
@@ -289,10 +241,6 @@ def synth(
     full = segs[0]
     for s in segs[1:]:
         full += s
-
-    # ADDED: Trim to max duration if specified (Issue 9)
-    if max_duration_ms is not None and max_duration_ms > 0:
-        full = trim_audio_to_duration(full, max_duration_ms)
 
     outf = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
     full.export(outf.name, format="wav")
