@@ -181,63 +181,6 @@ def analyze_music(music_path: str | Path, frame_ms: int = 200) -> dict:
     return {"drop_ms": drop_ms, "frame_ms": win}
 
 
-# ADDED: Handle edge case where voice is longer than music (Issue 9)
-def _handle_voice_longer_than_music(
-    voice: AudioSegment, 
-    music: AudioSegment, 
-    tolerance_ms: int = 2000
-) -> tuple[AudioSegment, AudioSegment, bool]:
-    """
-    Handle the edge case where synthesized voice is longer than music.
-    
-    Strategy:
-    1. If voice is only slightly longer (within tolerance), trim voice with fade-out
-    2. If voice is significantly longer, loop/extend music to match voice
-    
-    Args:
-        voice: Voice AudioSegment
-        music: Music AudioSegment
-        tolerance_ms: How much longer voice can be before we extend music instead of trimming
-    
-    Returns:
-        Tuple of (adjusted_voice, adjusted_music, was_adjusted)
-    """
-    voice_ms = len(voice)
-    music_ms = len(music)
-    
-    if voice_ms <= music_ms:
-        # Voice fits within music - no adjustment needed
-        return voice, music, False
-    
-    overage_ms = voice_ms - music_ms
-    print(f"[MIX] Voice ({voice_ms}ms) exceeds music ({music_ms}ms) by {overage_ms}ms")
-    
-    if overage_ms <= tolerance_ms:
-        # Small overage - trim voice with fade-out
-        print(f"[MIX] Trimming voice to music length with fade-out")
-        fade_duration = min(500, music_ms // 10)  # 500ms or 10% of music, whichever is smaller
-        trimmed_voice = voice[:music_ms]
-        if fade_duration > 0:
-            trimmed_voice = trimmed_voice.fade_out(fade_duration)
-        return trimmed_voice, music, True
-    else:
-        # Significant overage - extend music by looping
-        print(f"[MIX] Extending music to match voice length via looping")
-        loops_needed = math.ceil(voice_ms / music_ms)
-        extended_music = music
-        for _ in range(loops_needed - 1):
-            # Add crossfade between loops for smooth transition
-            crossfade_ms = min(1000, music_ms // 10)
-            if len(extended_music) > crossfade_ms and len(music) > crossfade_ms:
-                extended_music = extended_music.append(music, crossfade=crossfade_ms)
-            else:
-                extended_music = extended_music + music
-        
-        # Trim to exact voice length
-        extended_music = extended_music[:voice_ms]
-        return voice, extended_music, True
-
-
 def _duck_music_to_voice(
     music: AudioSegment,
     voice: AudioSegment,
@@ -406,11 +349,6 @@ def mix(
             voice = AudioSegment.from_file(tmp_v_out.name).set_frame_rate(44100).set_channels(2)
         except Exception:
             pass
-
-    # ADDED: Handle voice > music edge case before sync operations (Issue 9)
-    voice, music, was_adjusted = _handle_voice_longer_than_music(voice, music, tolerance_ms=2000)
-    if was_adjusted:
-        print(f"[MIX] After adjustment: voice={len(voice)}ms, music={len(music)}ms")
 
 
     ch = music.channels
