@@ -38,6 +38,15 @@ class Feedback(Base):
     session_insight = Column(Text, nullable=True)   
     meta_json = Column(Text, nullable=True)         
 
+    # ADDED: Extended feedback fields for Day 2+ personalization (Issue 10)
+    tell_us_more = Column(Text, nullable=True)
+    feeling_after = Column(String, nullable=True)
+    body_after = Column(String, nullable=True)
+    energy_after = Column(String, nullable=True)
+    goal_reflection = Column(Text, nullable=True)
+    what_helped = Column(Text, nullable=True)
+    what_was_hard = Column(Text, nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
