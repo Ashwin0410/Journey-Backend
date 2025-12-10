@@ -187,7 +187,7 @@ def generate(x: IntakeIn, q: Session = Depends(db)):
     if journey_day is not None and journey_day == 1:
         # Return static audio for Day 1
         session_id = sid()
-        static_audio_url = f"{c.PUBLIC_BASE_URL}/{DAY1_STATIC_AUDIO_FILENAME}"
+        static_audio_url = f"/assets/{DAY1_STATIC_AUDIO_FILENAME}"
         
         # Create session record for tracking
         row = Sessions(
