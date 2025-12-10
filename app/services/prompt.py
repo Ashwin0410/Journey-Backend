@@ -1,4 +1,3 @@
-
 from textwrap import dedent
 
 
@@ -136,8 +135,42 @@ def _day_theme(d: int | None) -> str:
         return ("Slow, steady recovery; routines, people, and meaning are starting to support them more regularly.")
     if d == 5:
         return ("Emergence; they can see both who they were and who they are becoming, with some gratitude and honesty.")
-    return ("Grounded, warm story with emotional depth but no drama for drama’s sake. "
+    return ("Grounded, warm story with emotional depth but no drama for drama's sake. "
             "Prefer clear scenes over abstract explanations.")
+
+
+# ADDED: Helper function to calculate safe target words with buffer (Issue 9)
+def get_safe_target_words(music_ms: int | None, spoken_target_ms: int | None, wps: float = 1.5) -> int:
+    """
+    Calculate a safe target word count that ensures voice won't exceed music length.
+    
+    Args:
+        music_ms: Total music duration in milliseconds
+        spoken_target_ms: Target spoken duration in milliseconds
+        wps: Words per second (reduced from 1.7 to 1.5 for safety)
+    
+    Returns:
+        Safe target word count with 15% buffer
+    """
+    if not spoken_target_ms or spoken_target_ms <= 0:
+        if music_ms and music_ms > 0:
+            # Use 80% of music duration as spoken target
+            spoken_target_ms = int(music_ms * 0.80)
+        else:
+            # Default fallback
+            return 600
+    
+    # Calculate base words from duration
+    seconds = max(1, spoken_target_ms // 1000)
+    base_words = int(seconds * wps)
+    
+    # Apply 15% safety buffer (reduce by 15%)
+    safe_words = int(base_words * 0.85)
+    
+    # Clamp between reasonable bounds
+    # Min: 400 words (~4 min at 1.5 wps)
+    # Max: 900 words (~10 min at 1.5 wps) - reduced from 1200
+    return max(400, min(safe_words, 900))
 
 
 def build(j: dict, target_words: int | None = None) -> str:
@@ -164,6 +197,13 @@ def build(j: dict, target_words: int | None = None) -> str:
     music_ms = j.get("music_ms")
     spoken_target_ms = j.get("spoken_target_ms")
     drop_ms = j.get("drop_ms")  # may be None if analysis failed
+
+    # MODIFIED: Use safe target words calculation if not explicitly provided (Issue 9)
+    if target_words is None or target_words <= 0:
+        target_words = get_safe_target_words(music_ms, spoken_target_ms)
+    else:
+        # Even if provided, cap at 900 to prevent voice exceeding music
+        target_words = min(target_words, 900)
 
     local = (
         f"In {pc}, a small nearby action feels possible. "
@@ -194,7 +234,7 @@ def build(j: dict, target_words: int | None = None) -> str:
         else:
             pos = "toward the later part of the track"
         drop_hint = (
-            f"- There is a musical “drop” or stronger change in energy {pos}. "
+            f"- There is a musical "drop" or stronger change in energy {pos}. "
             "Place ONE punchy, memorable sentence shortly BEFORE that emotional high point, "
             "then add a [pause] so it can land.\n"
         )
@@ -255,12 +295,12 @@ def build(j: dict, target_words: int | None = None) -> str:
     - Weave the recent win "{win}" into the story as a quiet sign that change is already happening.
     - Let the small action "{goal}" appear in one or two very concrete scenes (where they are, what time of day, what they actually do).
     - Acknowledge schema "{schema}" only once, as something that used to narrow the character's world.
-    - Gently contradict it once by showing the character doing something that doesn’t fit the schema.
+    - Gently contradict it once by showing the character doing something that doesn't fit the schema.
     - Use phrases and details that feel close to the intake answers instead of generic self-help language.
 
     High-level pacing (to align with music and the emotional arc above):
-    - Opening: a spacious beginning with short lines that drop us straight into a moment in the character’s day. Allow room for the music, with at least one early "[pause]". Let this part match the starting point of the {arc_label} arc.
-    - Middle: the character experiments with their small action and notices subtle shifts (internal or external). Let the rhythm build a little here in line with the arc’s middle section, including a few "[pause]" beats so the listener can feel the shifts.
+    - Opening: a spacious beginning with short lines that drop us straight into a moment in the character's day. Allow room for the music, with at least one early "[pause]". Let this part match the starting point of the {arc_label} arc.
+    - Middle: the character experiments with their small action and notices subtle shifts (internal or external). Let the rhythm build a little here in line with the arc's middle section, including a few "[pause]" beats so the listener can feel the shifts.
     - Emotional "climax": include ONE clearly cinematic, punchy sentence that feels like a turning point in the story, shortly before the musical high point. Place a "[pause]" immediately after it so it can land.
     - Closing: gently land the story in a calmer, grounded place that matches the final part of the {arc_label} arc. The last one or two sentences can hint that the listener might carry something similar into their own day, using at most one "you" sentence.
 
