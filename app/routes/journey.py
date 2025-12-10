@@ -8,7 +8,7 @@ from pydub import AudioSegment
 
 from ..schemas import IntakeIn, GenerateOut
 from ..db import SessionLocal
-from ..models import Sessions, Scripts, Activities, ActivitySessions, Users, MiniCheckins  # ← added MiniCheckins
+from ..models import Sessions, Scripts, Activities, ActivitySessions, Users, MiniCheckins, Feedback  # ADDED: Feedback
 from ..services import prompt as pr
 from ..services import llm
 from ..services import selector as sel
@@ -24,6 +24,9 @@ from ..core.config import cfg
 r = APIRouter()
 
 MUSIC_INTRO_MS = 6000   
+
+# ADDED: Static audio file path for Day 1 (Issue 6)
+STATIC_DAY1_AUDIO = "/app/assets/videoplayback.m4a"
 
 
 def db():
@@ -154,6 +157,162 @@ def _fallback_from_history(q: Session, user_hash: str | None) -> dict:
     return out
 
 
+# ADDED: Get latest feedback for Day 2+ personalization (Issue 10)
+def _get_latest_feedback(q: Session, user_hash: str | None) -> dict | None:
+    """
+    Retrieve the most recent feedback from a user's previous sessions.
+    Used to personalize Day 2+ journeys.
+    """
+    if not user_hash:
+        return None
+    
+    try:
+        # Find the most recent feedback for this user's sessions
+        latest = (
+            q.query(Feedback)
+            .join(Sessions, Feedback.session_id == Sessions.id)
+            .filter(Sessions.user_hash == user_hash)
+            .order_by(Feedback.created_at.desc())
+            .first()
+        )
+        
+        if not latest:
+            return None
+        
+        return {
+            "chills": latest.chills,
+            "relevance": latest.relevance,
+            "emotion_word": latest.emotion_word,
+            "chills_option": latest.chills_option,
+            "chills_detail": latest.chills_detail,
+            "session_insight": latest.session_insight,
+            "tell_us_more": getattr(latest, "tell_us_more", None),
+            "feeling_after": getattr(latest, "feeling_after", None),
+            "body_after": getattr(latest, "body_after", None),
+            "energy_after": getattr(latest, "energy_after", None),
+            "goal_reflection": getattr(latest, "goal_reflection", None),
+            "what_helped": getattr(latest, "what_helped", None),
+            "what_was_hard": getattr(latest, "what_was_hard", None),
+        }
+    except Exception:
+        return None
+
+
+# ADDED: Check if this is Day 1 (Issue 6)
+def _is_day_one(journey_day: int | None, user_hash: str | None, q: Session) -> bool:
+    """
+    Determine if this is the user's first journey (Day 1).
+    """
+    # Explicit journey_day of 1 means Day 1
+    if journey_day == 1:
+        return True
+    
+    # If journey_day is set and > 1, not Day 1
+    if journey_day is not None and journey_day > 1:
+        return False
+    
+    # If no user_hash, treat as Day 1
+    if not user_hash:
+        return True
+    
+    # Check if user has any previous sessions
+    try:
+        prev_session_count = (
+            q.query(Sessions)
+            .filter(Sessions.user_hash == user_hash)
+            .count()
+        )
+        return prev_session_count == 0
+    except Exception:
+        return True
+
+
+# ADDED: Serve static Day 1 audio (Issue 6)
+def _serve_static_day1_audio(x: IntakeIn, q: Session, effective: dict) -> GenerateOut:
+    """
+    Serve the pre-recorded static audio for Day 1 instead of generating.
+    """
+    c = cfg
+    
+    # Check if static file exists
+    static_path = Path(STATIC_DAY1_AUDIO)
+    if not static_path.exists():
+        # Fallback: if static file doesn't exist, raise error
+        # In production, you'd want to handle this more gracefully
+        raise HTTPException(
+            status_code=500, 
+            detail="Static Day 1 audio not found. Please contact support."
+        )
+    
+    # Load the static audio to get duration
+    static_audio = load_audio(str(static_path))
+    duration_ms_final = len(static_audio)
+    
+    # Generate a session ID
+    session_id = sid()
+    
+    # Copy static file to output directory with session ID
+    out_path = st.out_file(c.OUT_DIR, session_id)
+    
+    # Export as MP3 (consistent with generated journeys)
+    static_audio.export(out_path, format="mp3", bitrate="256k")
+    
+    # Get public URL
+    public_url = st.public_url(c.PUBLIC_BASE_URL, Path(out_path).name)
+    
+    # Static script excerpt for Day 1
+    static_excerpt = "Welcome to your first ReWire journey. This is a special introduction designed to help you settle in and experience the power of therapeutic audio..."
+    
+    # Create session record
+    row = Sessions(
+        id=session_id,
+        user_hash=x.user_hash or "",
+        track_id="static_day1",
+        voice_id="static",
+        audio_path=Path(out_path).name,
+        mood=effective["feeling"],
+        schema_hint=effective["schema_choice"],
+    )
+    q.add(row)
+    q.add(Scripts(session_id=session_id, script_text="[Static Day 1 Audio]"))
+    
+    # Save mini check-in data
+    try:
+        if x.user_hash:
+            q.add(
+                MiniCheckins(
+                    user_hash=x.user_hash,
+                    feeling=getattr(x, "feeling", None),
+                    body=getattr(x, "body", None),
+                    energy=getattr(x, "energy", None),
+                    goal_today=getattr(x, "goal_today", None),
+                    why_goal=getattr(x, "why_goal", None),
+                    last_win=getattr(x, "last_win", None),
+                    hard_thing=getattr(x, "hard_thing", None),
+                    schema_choice=effective["schema_choice"],
+                    postal_code=effective["postal_code"],
+                    place=getattr(x, "place", None) or effective["place"],
+                )
+            )
+    except Exception:
+        pass
+    
+    q.commit()
+    
+    return GenerateOut(
+        session_id=session_id,
+        audio_url=public_url,
+        duration_ms=duration_ms_final,
+        script_excerpt=static_excerpt,
+        script_text="[Static Day 1 Audio]",
+        track_id="static_day1",
+        voice_id="static",
+        music_folder="day1",
+        music_file="videoplayback.m4a",
+        journey_day=1,
+    )
+
+
 
 
 @r.post("/api/journey/generate", response_model=GenerateOut)
@@ -178,6 +337,16 @@ def generate(x: IntakeIn, q: Session = Depends(db)):
         "place": eff(getattr(x, "place", None), fb.get("place"), None),
         "journey_day": getattr(x, "journey_day", None) or fb.get("journey_day", None),
     }
+
+    # ADDED: Check if Day 1 and serve static audio (Issue 6)
+    if _is_day_one(effective["journey_day"], x.user_hash, q):
+        print("[JOURNEY] Day 1 detected - serving static audio")
+        return _serve_static_day1_audio(x, q, effective)
+
+    # ADDED: Get previous feedback for Day 2+ personalization (Issue 10)
+    prev_feedback = _get_latest_feedback(q, x.user_hash)
+    if prev_feedback:
+        print(f"[JOURNEY] Found previous feedback for personalization: emotion={prev_feedback.get('emotion_word')}")
 
     idx = sel.load_index()
 
@@ -205,7 +374,9 @@ def generate(x: IntakeIn, q: Session = Depends(db)):
     
     music_ms = duration_ms(load_audio(music_path))
     spoken_target_ms = max(int(music_ms - MUSIC_INTRO_MS), int(0.75 * music_ms))
-    target_words = min(_estimate_target_words(spoken_target_ms, wps=1.7), 1200)
+    
+    # CHANGED: Use the safe target words calculation from prompt.py (Issue 9)
+    target_words = pr.get_safe_target_words(music_ms, spoken_target_ms)
 
     
     jdict = x.model_dump()
@@ -219,6 +390,10 @@ def generate(x: IntakeIn, q: Session = Depends(db)):
     jdict["postal_code"] = effective["postal_code"]
     jdict["goal_today"] = effective["goal_today"]
     jdict["place"] = effective["place"]
+
+    # ADDED: Include previous feedback for Day 2+ personalization (Issue 10)
+    if prev_feedback:
+        jdict["prev_feedback"] = prev_feedback
 
     
     arc_name = pr.choose_arc(jdict)
@@ -246,7 +421,13 @@ def generate(x: IntakeIn, q: Session = Depends(db)):
     while True:
         script_for_tts = finalize_script(best_script)
 
-        tts_tmp_wav = tts.synth(script_for_tts, voice_id, c.ELEVENLABS_API_KEY)
+        # CHANGED: Pass max_duration_ms for safety trimming (Issue 9)
+        tts_tmp_wav = tts.synth(
+            script_for_tts, 
+            voice_id, 
+            c.ELEVENLABS_API_KEY,
+            max_duration_ms=spoken_target_ms  # Safety limit
+        )
         tts_ms = duration_ms(load_audio(tts_tmp_wav))
         wc = _word_count(script_for_tts)
         observed_wps = wc / max(1.0, tts_ms / 1000.0)
