@@ -1,3 +1,4 @@
+
 from typing import List, Optional, Dict, Any
 from datetime import date, datetime
 
@@ -48,15 +49,6 @@ class FeedbackIn(BaseModel):
     chills_option: str | None = None      
     chills_detail: str | None = None      
     session_insight: str | None = None    
-
-    # ADDED: Extended feedback fields for Day 2+ personalization (Issue 10)
-    tell_us_more: str | None = None
-    feeling_after: str | None = None
-    body_after: str | None = None
-    energy_after: str | None = None
-    goal_reflection: str | None = None
-    what_helped: str | None = None
-    what_was_hard: str | None = None
 
 
 
@@ -224,9 +216,7 @@ class IntakeFullIn(BaseModel):
 
     
     weekly_plan: WeeklyPlanIn
-    
-    # CHANGED: Made optional to hide 90-year-old question (Issue 5)
-    good_life_answer: Optional[str] = None
+    good_life_answer: str
 
 
 class IntakeFullOut(BaseModel):
