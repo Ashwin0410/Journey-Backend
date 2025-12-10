@@ -49,6 +49,15 @@ class FeedbackIn(BaseModel):
     chills_detail: str | None = None      
     session_insight: str | None = None    
 
+    # ADDED: Extended feedback fields for Day 2+ personalization (Issue 10)
+    tell_us_more: str | None = None
+    feeling_after: str | None = None
+    body_after: str | None = None
+    energy_after: str | None = None
+    goal_reflection: str | None = None
+    what_helped: str | None = None
+    what_was_hard: str | None = None
+
 
 
 
