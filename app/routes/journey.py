@@ -25,6 +25,9 @@ r = APIRouter()
 
 MUSIC_INTRO_MS = 6000   
 
+# ISSUE 8: Static audio file for Day 1 (no generation needed)
+DAY1_STATIC_AUDIO_FILENAME = "videoplayback.m4a"
+
 
 def db():
     q = SessionLocal()
@@ -178,6 +181,65 @@ def generate(x: IntakeIn, q: Session = Depends(db)):
         "place": eff(getattr(x, "place", None), fb.get("place"), None),
         "journey_day": getattr(x, "journey_day", None) or fb.get("journey_day", None),
     }
+
+    # ISSUE 8: Check if Day 1 - return static audio without generation
+    journey_day = effective.get("journey_day")
+    if journey_day is not None and journey_day == 1:
+        # Return static audio for Day 1
+        session_id = sid()
+        static_audio_url = f"{c.PUBLIC_BASE_URL}/{DAY1_STATIC_AUDIO_FILENAME}"
+        
+        # Create session record for tracking
+        row = Sessions(
+            id=session_id,
+            user_hash=x.user_hash or "",
+            track_id="day1_static",
+            voice_id="static",
+            audio_path=DAY1_STATIC_AUDIO_FILENAME,
+            mood=effective["feeling"],
+            schema_hint=effective["schema_choice"],
+        )
+        q.add(row)
+        
+        # Add script record
+        day1_script = "Welcome to your first journey with ReWire. This is the beginning of something meaningful."
+        q.add(Scripts(session_id=session_id, script_text=day1_script))
+        
+        # Save mini check-in snapshot
+        try:
+            if x.user_hash:
+                q.add(
+                    MiniCheckins(
+                        user_hash=x.user_hash,
+                        feeling=getattr(x, "feeling", None),
+                        body=getattr(x, "body", None),
+                        energy=getattr(x, "energy", None),
+                        goal_today=getattr(x, "goal_today", None),
+                        why_goal=getattr(x, "why_goal", None),
+                        last_win=getattr(x, "last_win", None),
+                        hard_thing=getattr(x, "hard_thing", None),
+                        schema_choice=effective["schema_choice"],
+                        postal_code=effective["postal_code"],
+                        place=getattr(x, "place", None) or effective["place"],
+                    )
+                )
+        except Exception:
+            pass
+        
+        q.commit()
+        
+        return GenerateOut(
+            session_id=session_id,
+            audio_url=static_audio_url,
+            duration_ms=720000,  # 12 minutes default
+            script_excerpt=day1_script,
+            script_text=day1_script,
+            track_id="day1_static",
+            voice_id="static",
+            music_folder="day1",
+            music_file=DAY1_STATIC_AUDIO_FILENAME,
+            journey_day=1,
+        )
 
     idx = sel.load_index()
 
