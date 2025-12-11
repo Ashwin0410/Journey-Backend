@@ -124,6 +124,10 @@ class Users(Base):
     provider = Column(String, nullable=False)    
     provider_id = Column(String, nullable=False) 
 
+    # CHANGE #2: Password hash for email/password authentication
+    # Nullable because Google OAuth users won't have a password
+    password_hash = Column(String, nullable=True)
+
     profile_json = Column(Text, nullable=True)   
 
     
