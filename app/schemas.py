@@ -1,8 +1,7 @@
-
 from typing import List, Optional, Dict, Any
 from datetime import date, datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, EmailStr
 
 
 
@@ -162,6 +161,28 @@ class TokenOut(BaseModel):
     user: UserOut
 
 
+# ==================== CHANGE #2: Email/Password Auth Schemas ====================
+
+class EmailLoginIn(BaseModel):
+    """Schema for email/password login request"""
+    email: str
+    password: str
+
+
+class EmailRegisterIn(BaseModel):
+    """Schema for email/password registration request"""
+    email: str
+    password: str = Field(min_length=8)
+    name: Optional[str] = None
+
+
+class AuthErrorOut(BaseModel):
+    """Schema for authentication error responses"""
+    error: str
+    detail: Optional[str] = None
+
+
+# ==================== END CHANGE #2 ====================
 
 
 
