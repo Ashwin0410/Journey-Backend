@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from datetime import date
+import hashlib
 import json
 from typing import Dict
 from urllib.parse import urlencode
 
+import bcrypt
 import requests
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
@@ -25,6 +27,33 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+# ==================== CHANGE #2: Password Hashing Utilities ====================
+
+def hash_password(password: str) -> str:
+    """Hash a password using bcrypt"""
+    salt = bcrypt.gensalt()
+    hashed = bcrypt.hashpw(password.encode("utf-8"), salt)
+    return hashed.decode("utf-8")
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    """Verify a password against its hash"""
+    try:
+        return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
+    except Exception:
+        return False
+
+
+def generate_user_hash_from_email(email: str) -> str:
+    """Generate a unique user_hash from email for email/password users"""
+    email_lower = email.lower().strip()
+    hash_input = f"email_{email_lower}"
+    return f"email_{hashlib.sha256(hash_input.encode()).hexdigest()[:16]}"
+
+
+# ==================== END Password Hashing Utilities ====================
 
 
 
@@ -150,6 +179,137 @@ def google_callback(
     frontend_url = f"{c.FRONTEND_BASE_URL}/?token={jwt_token}"
 
     return RedirectResponse(url=frontend_url, status_code=302)
+
+
+# ==================== CHANGE #2: Email/Password Registration ====================
+
+@r.post("/register", response_model=schemas.TokenOut)
+def register_with_email(
+    payload: schemas.EmailRegisterIn,
+    db: Session = Depends(get_db),
+):
+    """Register a new user with email and password"""
+    
+    email = payload.email.lower().strip()
+    password = payload.password
+    name = payload.name
+    
+    # Validate email format (basic check)
+    if not email or "@" not in email or "." not in email:
+        raise HTTPException(status_code=400, detail="Invalid email address")
+    
+    # Check if email already exists
+    existing_user = (
+        db.query(models.Users)
+        .filter(models.Users.email == email)
+        .first()
+    )
+    
+    if existing_user:
+        raise HTTPException(
+            status_code=400, 
+            detail="An account with this email already exists"
+        )
+    
+    # Generate user_hash and password_hash
+    user_hash = generate_user_hash_from_email(email)
+    password_hash = hash_password(password)
+    
+    today = date.today()
+    
+    # Create new user
+    user = models.Users(
+        user_hash=user_hash,
+        email=email,
+        name=name,
+        provider="email",
+        provider_id=email,  # For email users, provider_id is the email
+        password_hash=password_hash,
+        journey_day=1,
+        last_journey_date=today,
+    )
+    
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    
+    # Create JWT token
+    jwt_token = create_access_token({"sub": user.user_hash})
+    
+    return schemas.TokenOut(
+        access_token=jwt_token,
+        token_type="bearer",
+        user=schemas.UserOut.from_orm(user),
+    )
+
+
+# ==================== CHANGE #2: Email/Password Login ====================
+
+@r.post("/login", response_model=schemas.TokenOut)
+def login_with_email(
+    payload: schemas.EmailLoginIn,
+    db: Session = Depends(get_db),
+):
+    """Login with email and password"""
+    
+    email = payload.email.lower().strip()
+    password = payload.password
+    
+    # Find user by email
+    user = (
+        db.query(models.Users)
+        .filter(models.Users.email == email)
+        .first()
+    )
+    
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    
+    # Check if this is an email/password user
+    if user.provider != "email":
+        raise HTTPException(
+            status_code=400,
+            detail=f"This account uses {user.provider} login. Please sign in with {user.provider.title()}."
+        )
+    
+    # Verify password
+    if not user.password_hash:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    
+    if not verify_password(password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    
+    # Update journey_day if needed
+    today = date.today()
+    changed = False
+    
+    if user.journey_day is None:
+        user.journey_day = 1
+        changed = True
+    
+    if user.last_journey_date is None:
+        user.last_journey_date = today
+        changed = True
+    elif user.last_journey_date != today:
+        user.journey_day = (user.journey_day or 1) + 1
+        user.last_journey_date = today
+        changed = True
+    
+    if changed:
+        db.commit()
+        db.refresh(user)
+    
+    # Create JWT token
+    jwt_token = create_access_token({"sub": user.user_hash})
+    
+    return schemas.TokenOut(
+        access_token=jwt_token,
+        token_type="bearer",
+        user=schemas.UserOut.from_orm(user),
+    )
+
+
+# ==================== END CHANGE #2 ====================
 
 
 
