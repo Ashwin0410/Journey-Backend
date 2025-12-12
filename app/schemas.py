@@ -1,4 +1,3 @@
-
 from typing import List, Optional, Dict, Any
 from datetime import date, datetime
 
@@ -348,3 +347,21 @@ class Phq9ItemUpdateByNumberIn(BaseModel):
     question_number: int = Field(ge=1, le=9)
     score: Optional[int] = None
     note: Optional[str] = None
+
+
+# ============================================================================
+# EMAIL/PASSWORD AUTHENTICATION SCHEMAS
+# ============================================================================
+
+
+class RegisterIn(BaseModel):
+    """Schema for user registration with email and password."""
+    name: str
+    email: str
+    password: str
+
+
+class LoginIn(BaseModel):
+    """Schema for user login with email and password."""
+    email: str
+    password: str
