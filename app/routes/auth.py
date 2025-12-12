@@ -4,7 +4,9 @@ from datetime import date
 import json
 from typing import Dict
 from urllib.parse import urlencode
+import uuid
 
+import bcrypt
 import requests
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
@@ -18,6 +20,30 @@ from app.auth_utils import create_access_token, get_current_user
 r = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
+# ============================================================================
+# PASSWORD HASHING UTILITIES
+# ============================================================================
+
+
+def hash_password(password: str) -> str:
+    """Hash a password using bcrypt."""
+    password_bytes = password.encode("utf-8")
+    salt = bcrypt.gensalt()
+    hashed = bcrypt.hashpw(password_bytes, salt)
+    return hashed.decode("utf-8")
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    """Verify a password against its hash."""
+    password_bytes = password.encode("utf-8")
+    hashed_bytes = hashed.encode("utf-8")
+    return bcrypt.checkpw(password_bytes, hashed_bytes)
+
+
+# ============================================================================
+# DATABASE DEPENDENCY
+# ============================================================================
+
 
 def get_db():
     db = SessionLocal()
@@ -26,6 +52,10 @@ def get_db():
     finally:
         db.close()
 
+
+# ============================================================================
+# GOOGLE OAUTH ENDPOINTS (EXISTING)
+# ============================================================================
 
 
 @r.get("/google/login")
@@ -152,6 +182,10 @@ def google_callback(
     return RedirectResponse(url=frontend_url, status_code=302)
 
 
+# ============================================================================
+# CURRENT USER ENDPOINT (EXISTING)
+# ============================================================================
+
 
 @r.get("/me", response_model=schemas.UserOut)
 def get_me(
@@ -184,3 +218,125 @@ def get_me(
         db.refresh(user)
 
     return user
+
+
+# ============================================================================
+# EMAIL/PASSWORD AUTHENTICATION ENDPOINTS (NEW)
+# ============================================================================
+
+
+@r.post("/register", response_model=schemas.UserOut)
+def register(
+    payload: schemas.RegisterIn,
+    db: Session = Depends(get_db),
+):
+    """
+    Register a new user with email and password.
+    
+    - Creates a new user with provider="email"
+    - Hashes the password using bcrypt
+    - Returns the user object (frontend will need to call /login to get token)
+    """
+    
+    # Check if email already exists
+    existing_user = (
+        db.query(models.Users)
+        .filter(models.Users.email == payload.email)
+        .first()
+    )
+    
+    if existing_user:
+        raise HTTPException(
+            status_code=400,
+            detail="An account with this email already exists",
+        )
+    
+    # Generate unique user_hash for email users
+    unique_id = uuid.uuid4().hex[:12]
+    user_hash = f"email_{unique_id}"
+    
+    # Hash the password
+    password_hashed = hash_password(payload.password)
+    
+    today = date.today()
+    
+    # Create new user
+    user = models.Users(
+        user_hash=user_hash,
+        email=payload.email,
+        name=payload.name,
+        provider="email",
+        provider_id=None,
+        password_hash=password_hashed,
+        profile_json=None,
+        journey_day=1,
+        last_journey_date=today,
+    )
+    
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    
+    return user
+
+
+@r.post("/login", response_model=schemas.TokenOut)
+def login(
+    payload: schemas.LoginIn,
+    db: Session = Depends(get_db),
+):
+    """
+    Login with email and password.
+    
+    - Validates email exists and password matches
+    - Returns JWT token and user object
+    """
+    
+    # Find user by email
+    user = (
+        db.query(models.Users)
+        .filter(models.Users.email == payload.email)
+        .first()
+    )
+    
+    if not user:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid email or password",
+        )
+    
+    # Check if this is an email user (has password_hash)
+    if user.provider != "email" or not user.password_hash:
+        raise HTTPException(
+            status_code=401,
+            detail="This account uses Google sign-in. Please use 'Sign in with Google'.",
+        )
+    
+    # Verify password
+    if not verify_password(payload.password, user.password_hash):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid email or password",
+        )
+    
+    # Update journey day if needed
+    today = date.today()
+    if user.journey_day is None:
+        user.journey_day = 1
+    if user.last_journey_date is None:
+        user.last_journey_date = today
+    elif user.last_journey_date != today:
+        user.journey_day = (user.journey_day or 1) + 1
+        user.last_journey_date = today
+    
+    db.commit()
+    db.refresh(user)
+    
+    # Create JWT token
+    jwt_token = create_access_token({"sub": user.user_hash})
+    
+    return schemas.TokenOut(
+        access_token=jwt_token,
+        token_type="bearer",
+        user=user,
+    )
