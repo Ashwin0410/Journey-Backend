@@ -1,3 +1,4 @@
+
 from textwrap import dedent
 
 
@@ -135,7 +136,7 @@ def _day_theme(d: int | None) -> str:
         return ("Slow, steady recovery; routines, people, and meaning are starting to support them more regularly.")
     if d == 5:
         return ("Emergence; they can see both who they were and who they are becoming, with some gratitude and honesty.")
-    return ("Grounded, warm story with emotional depth but no drama for drama's sake. "
+    return ("Grounded, warm story with emotional depth but no drama for drama’s sake. "
             "Prefer clear scenes over abstract explanations.")
 
 
@@ -152,11 +153,6 @@ def build(j: dict, target_words: int | None = None) -> str:
     schema = j.get("schema_choice", "unseen")
     pc = j.get("postal_code", "")
     place = j.get("place", "indoors")
-
-    # CHANGE #14: Extract previous reflection data for Day 2+ personalization
-    previous_reflection = j.get("previous_reflection")
-    previous_insight = j.get("previous_insight")
-    previous_chills_detail = j.get("previous_chills_detail")
 
     
     arc_name = j.get("arc_name") or choose_arc(j)
@@ -198,38 +194,10 @@ def build(j: dict, target_words: int | None = None) -> str:
         else:
             pos = "toward the later part of the track"
         drop_hint = (
-            f"- There is a musical 'drop' or stronger change in energy {pos}. "
+            f"- There is a musical “drop” or stronger change in energy {pos}. "
             "Place ONE punchy, memorable sentence shortly BEFORE that emotional high point, "
             "then add a [pause] so it can land.\n"
         )
-
-    # ==================== CHANGE #14: Build previous session context ====================
-    # For Day 2+, use the previous session's reflection data to personalize the journey
-    previous_session_context = ""
-    if d and d >= 2:
-        context_parts = []
-        
-        if previous_reflection:
-            context_parts.append(f'What stood out to them yesterday: "{previous_reflection}"')
-        
-        if previous_insight:
-            context_parts.append(f'An insight they had: "{previous_insight}"')
-        
-        if previous_chills_detail:
-            context_parts.append(f'A moment that moved them deeply: "{previous_chills_detail}"')
-        
-        if context_parts:
-            previous_session_context = (
-                "\n\nContinuity from their previous session:\n"
-                "The character has been on this journey before. Yesterday's session left an impression.\n"
-                + "\n".join(f"- {part}" for part in context_parts) +
-                "\n\nUse this continuity subtly:\n"
-                "- Reference or echo one element from their previous reflection naturally in today's story.\n"
-                "- Show how yesterday's small shift is still present — perhaps as a memory, a new habit forming, or a different way of seeing something familiar.\n"
-                "- Do NOT quote their words directly. Instead, weave the essence of what mattered to them into today's narrative.\n"
-                "- This creates a sense that their journey is building, not starting fresh each day.\n"
-            )
-    # ==================== END CHANGE #14 ====================
 
     return dedent(f"""
     Write a single continuous spoken script for Journey Day {d or 0}.
@@ -255,7 +223,7 @@ def build(j: dict, target_words: int | None = None) -> str:
     - Today they try a small concrete action: "{goal}" because "{why}".
     - They have had a recent small win: "{win}".
     - The hard thing in the background is: "{hard}".
-    {previous_session_context}
+
     Voice & perspective:
     - Use third person almost all the time (for example: "They wake up with a familiar heaviness...").
     - Do NOT give the character a specific name; refer to them only as "they" / "them".
@@ -287,12 +255,12 @@ def build(j: dict, target_words: int | None = None) -> str:
     - Weave the recent win "{win}" into the story as a quiet sign that change is already happening.
     - Let the small action "{goal}" appear in one or two very concrete scenes (where they are, what time of day, what they actually do).
     - Acknowledge schema "{schema}" only once, as something that used to narrow the character's world.
-    - Gently contradict it once by showing the character doing something that doesn't fit the schema.
+    - Gently contradict it once by showing the character doing something that doesn’t fit the schema.
     - Use phrases and details that feel close to the intake answers instead of generic self-help language.
 
     High-level pacing (to align with music and the emotional arc above):
-    - Opening: a spacious beginning with short lines that drop us straight into a moment in the character's day. Allow room for the music, with at least one early "[pause]". Let this part match the starting point of the {arc_label} arc.
-    - Middle: the character experiments with their small action and notices subtle shifts (internal or external). Let the rhythm build a little here in line with the arc's middle section, including a few "[pause]" beats so the listener can feel the shifts.
+    - Opening: a spacious beginning with short lines that drop us straight into a moment in the character’s day. Allow room for the music, with at least one early "[pause]". Let this part match the starting point of the {arc_label} arc.
+    - Middle: the character experiments with their small action and notices subtle shifts (internal or external). Let the rhythm build a little here in line with the arc’s middle section, including a few "[pause]" beats so the listener can feel the shifts.
     - Emotional "climax": include ONE clearly cinematic, punchy sentence that feels like a turning point in the story, shortly before the musical high point. Place a "[pause]" immediately after it so it can land.
     - Closing: gently land the story in a calmer, grounded place that matches the final part of the {arc_label} arc. The last one or two sentences can hint that the listener might carry something similar into their own day, using at most one "you" sentence.
 
