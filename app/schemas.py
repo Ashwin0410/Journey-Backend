@@ -1,7 +1,8 @@
+
 from typing import List, Optional, Dict, Any
 from datetime import date, datetime
 
-from pydantic import BaseModel, Field, EmailStr
+from pydantic import BaseModel, Field
 
 
 
@@ -117,18 +118,6 @@ class ActivityCurrentOut(BaseModel):
     activity: Optional[ActivityRecommendationOut] = None
 
 
-# ==================== CHANGE #14: Last Reflection Schema ====================
-
-class LastReflectionOut(BaseModel):
-    """Schema for previous session's reflection data (used for Day 2+ personalization)"""
-    session_insight: Optional[str] = None
-    chills_detail: Optional[str] = None
-    reflection_text: Optional[str] = None
-    emotion_word: Optional[str] = None
-    chills_option: Optional[str] = None
-
-# ==================== END CHANGE #14 ====================
-
 
 
 
@@ -144,15 +133,6 @@ class TodaySummaryOut(BaseModel):
     recommended_activity: Optional[ActivityRecommendationOut] = None
     
     postal_code: Optional[str] = None
-
-    # ==================== CHANGE #14: Add reflection fields for Day 2+ ====================
-    # These fields contain the previous session's reflection data
-    # Used by journey.js to skip mini check-in and personalize Day 2+ journeys
-    last_reflection: Optional[LastReflectionOut] = None
-    last_session_insight: Optional[str] = None
-    last_reflection_text: Optional[str] = None
-    last_chills_detail: Optional[str] = None
-    # ==================== END CHANGE #14 ====================
 
 
 
@@ -182,28 +162,6 @@ class TokenOut(BaseModel):
     user: UserOut
 
 
-# ==================== CHANGE #2: Email/Password Auth Schemas ====================
-
-class EmailLoginIn(BaseModel):
-    """Schema for email/password login request"""
-    email: str
-    password: str
-
-
-class EmailRegisterIn(BaseModel):
-    """Schema for email/password registration request"""
-    email: str
-    password: str = Field(min_length=8)
-    name: Optional[str] = None
-
-
-class AuthErrorOut(BaseModel):
-    """Schema for authentication error responses"""
-    error: str
-    detail: Optional[str] = None
-
-
-# ==================== END CHANGE #2 ====================
 
 
 
