@@ -122,7 +122,9 @@ class Users(Base):
     name = Column(String, nullable=True)
 
     provider = Column(String, nullable=False)    
-    provider_id = Column(String, nullable=False) 
+    provider_id = Column(String, nullable=True)  # nullable for email users
+
+    password_hash = Column(String, nullable=True)  # for email/password auth
 
     profile_json = Column(Text, nullable=True)   
 
