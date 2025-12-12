@@ -1,7 +1,6 @@
 from pathlib import Path
 import os
 import tempfile
-import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -9,7 +8,7 @@ from pydub import AudioSegment
 
 from ..schemas import IntakeIn, GenerateOut
 from ..db import SessionLocal
-from ..models import Sessions, Scripts, Activities, ActivitySessions, Users, MiniCheckins, Feedback  # ← added Feedback
+from ..models import Sessions, Scripts, Activities, ActivitySessions, Users, MiniCheckins  # ← added MiniCheckins
 from ..services import prompt as pr
 from ..services import llm
 from ..services import selector as sel
@@ -109,12 +108,6 @@ def _build_continue_prompt(base_json: dict, last_tail: str, need_more: int) -> s
 
 
 def _fallback_from_history(q: Session, user_hash: str | None) -> dict:
-    """
-    Gather fallback/contextual data from user's history.
-    
-    CHANGE #14: Now also queries Feedback table to get previous reflection data
-    (session_insight, chills_detail, reflection_text) for Day 2+ personalization.
-    """
 
     out = {
         "feeling": None,
@@ -123,10 +116,6 @@ def _fallback_from_history(q: Session, user_hash: str | None) -> dict:
         "goal_today": None,
         "place": None,
         "journey_day": None,
-        # CHANGE #14: Add fields for previous session reflection
-        "previous_reflection": None,
-        "previous_insight": None,
-        "previous_chills_detail": None,
     }
     if not user_hash:
         return out
@@ -165,92 +154,6 @@ def _fallback_from_history(q: Session, user_hash: str | None) -> dict:
     except Exception:
         pass
 
-    # ==================== CHANGE #14: Query Feedback table ====================
-    # Get the most recent feedback entry for this user to use for Day 2+ personalization
-    try:
-        # Find the user's most recent session
-        if last_sess:
-            # Query feedback for that session
-            last_feedback = (
-                q.query(Feedback)
-                .filter(Feedback.session_id == last_sess.id)
-                .order_by(Feedback.created_at.desc())
-                .first()
-            )
-            
-            if last_feedback:
-                # Extract session_insight (from "Any insights from this session?")
-                if last_feedback.session_insight:
-                    out["previous_insight"] = last_feedback.session_insight.strip()
-                
-                # Extract chills_detail (from "What sparked those moments?")
-                if last_feedback.chills_detail:
-                    out["previous_chills_detail"] = last_feedback.chills_detail.strip()
-                
-                # Extract reflection_text from meta_json if present
-                # (from "What stood out?" in the reflection textarea)
-                if last_feedback.meta_json:
-                    try:
-                        meta = json.loads(last_feedback.meta_json)
-                        if isinstance(meta, dict):
-                            # Check common keys where reflection might be stored
-                            reflection = (
-                                meta.get("reflection_text") or 
-                                meta.get("reflection") or 
-                                meta.get("what_stood_out") or
-                                meta.get("stood_out")
-                            )
-                            if reflection and isinstance(reflection, str):
-                                out["previous_reflection"] = reflection.strip()
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-        
-        # If no feedback found for last session, try to find any recent feedback for this user
-        if not out["previous_insight"] and not out["previous_reflection"]:
-            # Get all session IDs for this user
-            user_sessions = (
-                q.query(Sessions.id)
-                .filter(Sessions.user_hash == user_hash)
-                .order_by(Sessions.created_at.desc())
-                .limit(5)
-                .all()
-            )
-            session_ids = [s.id for s in user_sessions]
-            
-            if session_ids:
-                recent_feedback = (
-                    q.query(Feedback)
-                    .filter(Feedback.session_id.in_(session_ids))
-                    .order_by(Feedback.created_at.desc())
-                    .first()
-                )
-                
-                if recent_feedback:
-                    if recent_feedback.session_insight and not out["previous_insight"]:
-                        out["previous_insight"] = recent_feedback.session_insight.strip()
-                    
-                    if recent_feedback.chills_detail and not out["previous_chills_detail"]:
-                        out["previous_chills_detail"] = recent_feedback.chills_detail.strip()
-                    
-                    if recent_feedback.meta_json and not out["previous_reflection"]:
-                        try:
-                            meta = json.loads(recent_feedback.meta_json)
-                            if isinstance(meta, dict):
-                                reflection = (
-                                    meta.get("reflection_text") or 
-                                    meta.get("reflection") or 
-                                    meta.get("what_stood_out") or
-                                    meta.get("stood_out")
-                                )
-                                if reflection and isinstance(reflection, str):
-                                    out["previous_reflection"] = reflection.strip()
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-    except Exception:
-        # Don't fail journey generation if feedback query fails
-        pass
-    # ==================== END CHANGE #14 ====================
-
     return out
 
 
@@ -277,10 +180,6 @@ def generate(x: IntakeIn, q: Session = Depends(db)):
         "goal_today": eff(getattr(x, "goal_today", None), fb.get("goal_today"), "show up for the day"),
         "place": eff(getattr(x, "place", None), fb.get("place"), None),
         "journey_day": getattr(x, "journey_day", None) or fb.get("journey_day", None),
-        # CHANGE #14: Include previous reflection data in effective dict
-        "previous_reflection": fb.get("previous_reflection"),
-        "previous_insight": fb.get("previous_insight"),
-        "previous_chills_detail": fb.get("previous_chills_detail"),
     }
 
     # ISSUE 8: Check if Day 1 - return static audio without generation
@@ -382,11 +281,6 @@ def generate(x: IntakeIn, q: Session = Depends(db)):
     jdict["postal_code"] = effective["postal_code"]
     jdict["goal_today"] = effective["goal_today"]
     jdict["place"] = effective["place"]
-
-    # CHANGE #14: Add previous reflection data to jdict for prompt building
-    jdict["previous_reflection"] = effective["previous_reflection"]
-    jdict["previous_insight"] = effective["previous_insight"]
-    jdict["previous_chills_detail"] = effective["previous_chills_detail"]
 
     
     arc_name = pr.choose_arc(jdict)
