@@ -225,7 +225,7 @@ def get_me(
 # ============================================================================
 
 
-@r.post("/register", response_model=schemas.UserOut)
+@r.post("/register")
 def register(
     payload: schemas.RegisterIn,
     db: Session = Depends(get_db),
@@ -277,10 +277,22 @@ def register(
     db.commit()
     db.refresh(user)
     
-    return user
+    # Return user as dictionary
+    return {
+        "id": user.id,
+        "user_hash": user.user_hash,
+        "email": user.email,
+        "name": user.name,
+        "provider": user.provider,
+        "journey_day": user.journey_day,
+        "last_journey_date": str(user.last_journey_date) if user.last_journey_date else None,
+        "onboarding_complete": user.onboarding_complete,
+        "safety_flag": user.safety_flag,
+        "last_phq9_date": str(user.last_phq9_date) if user.last_phq9_date else None,
+    }
 
 
-@r.post("/login", response_model=schemas.TokenOut)
+@r.post("/login")
 def login(
     payload: schemas.LoginIn,
     db: Session = Depends(get_db),
@@ -335,8 +347,20 @@ def login(
     # Create JWT token
     jwt_token = create_access_token({"sub": user.user_hash})
     
-    return schemas.TokenOut(
-        access_token=jwt_token,
-        token_type="bearer",
-        user=user,
-    )
+    # Return as plain dictionary to avoid Pydantic validation issues
+    return {
+        "access_token": jwt_token,
+        "token_type": "bearer",
+        "user": {
+            "id": user.id,
+            "user_hash": user.user_hash,
+            "email": user.email,
+            "name": user.name,
+            "provider": user.provider,
+            "journey_day": user.journey_day,
+            "last_journey_date": str(user.last_journey_date) if user.last_journey_date else None,
+            "onboarding_complete": user.onboarding_complete,
+            "safety_flag": user.safety_flag,
+            "last_phq9_date": str(user.last_phq9_date) if user.last_phq9_date else None,
+        },
+    }
