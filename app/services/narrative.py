@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import math
 from datetime import datetime
 from typing import Optional, Dict, Any, List
@@ -106,11 +105,6 @@ def _pick_schema_label(db: Session, user_hash: str) -> Optional[str]:
 
 
 def _last_session_feedback(db: Session, user_hash: str) -> Dict[str, Any]:
-    """
-    Get the user's last session and its feedback data.
-    
-    CHANGE #14: Also extracts reflection_text from meta_json for Day 2+ personalization.
-    """
     session = (
         db.query(models.Sessions)
         .filter(models.Sessions.user_hash == user_hash)
@@ -134,25 +128,6 @@ def _last_session_feedback(db: Session, user_hash: str) -> Dict[str, Any]:
 
     feedback_obj = None
     if fb:
-        # CHANGE #14: Extract reflection_text from meta_json if present
-        reflection_text = None
-        if fb.meta_json:
-            try:
-                meta = json.loads(fb.meta_json)
-                if isinstance(meta, dict):
-                    reflection_text = (
-                        meta.get("reflection_text") or
-                        meta.get("reflection") or
-                        meta.get("what_stood_out") or
-                        meta.get("stood_out")
-                    )
-                    if reflection_text and isinstance(reflection_text, str):
-                        reflection_text = reflection_text.strip()
-                    else:
-                        reflection_text = None
-            except (json.JSONDecodeError, TypeError):
-                pass
-
         feedback_obj = {
             "chills": fb.chills,
             "relevance": fb.relevance,
@@ -160,8 +135,6 @@ def _last_session_feedback(db: Session, user_hash: str) -> Dict[str, Any]:
             "chills_option": fb.chills_option,
             "chills_detail": fb.chills_detail,
             "session_insight": fb.session_insight,
-            # CHANGE #14: Include reflection_text in feedback object
-            "reflection_text": reflection_text,
         }
 
     return {
@@ -184,7 +157,7 @@ def _build_hero_narrative(
     mood_phrase = mood or "mixed"
 
     base = (
-        f"You're quietly collecting evidence that you're more than {schema_phrase}. "
+        f"You’re quietly collecting evidence that you’re more than {schema_phrase}. "
         f"Even on {mood_phrase} days, the fact that {name_piece} keeps showing up "
         "is proof of agency, not failure."
     )
@@ -211,7 +184,7 @@ def _build_hero_narrative(
     else:
         text = (
             base
-            + " You're building a track record of small, boring, solid evidence that you can move "
+            + " You’re building a track record of small, boring, solid evidence that you can move "
               "through this, one step at a time."
         )
 
@@ -242,6 +215,7 @@ def _pick_recommended_activity(db: Session) -> Optional[schemas.ActivityRecommen
     tags: List[str] = []
     if row.tags_json:
         try:
+            import json 
             tags = json.loads(row.tags_json) or []
         except Exception:
             tags = []
@@ -314,29 +288,6 @@ def build_today_summary(db: Session, user: models.Users) -> schemas.TodaySummary
 
     postal_code = _extract_postal_code(db, user.user_hash)
 
-    # ==================== CHANGE #14: Build last_reflection object ====================
-    # Extract reflection data from the last session's feedback for Day 2+ personalization
-    last_reflection = None
-    last_session_insight = None
-    last_reflection_text = None
-    last_chills_detail = None
-
-    feedback = session_info.get("feedback")
-    if feedback:
-        last_session_insight = feedback.get("session_insight")
-        last_reflection_text = feedback.get("reflection_text")
-        last_chills_detail = feedback.get("chills_detail")
-
-        # Build the LastReflectionOut object
-        last_reflection = schemas.LastReflectionOut(
-            session_insight=last_session_insight,
-            chills_detail=last_chills_detail,
-            reflection_text=last_reflection_text,
-            emotion_word=feedback.get("emotion_word"),
-            chills_option=feedback.get("chills_option"),
-        )
-    # ==================== END CHANGE #14 ====================
-
     return schemas.TodaySummaryOut(
         greeting=greeting,
         current_date=now.date(),
@@ -348,9 +299,4 @@ def build_today_summary(db: Session, user: models.Users) -> schemas.TodaySummary
         journey_cooldown_minutes_remaining=cooldown_remaining,
         recommended_activity=rec_act,
         postal_code=postal_code,
-        # CHANGE #14: Include reflection data for Day 2+ personalization
-        last_reflection=last_reflection,
-        last_session_insight=last_session_insight,
-        last_reflection_text=last_reflection_text,
-        last_chills_detail=last_chills_detail,
     )
