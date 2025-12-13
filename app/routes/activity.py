@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.db import SessionLocal
 from app import models, schemas
 from app.core.config import cfg as c
+from app.services import narrative as narrative_service
 
 
 
@@ -131,6 +132,11 @@ def _generate_activities_via_llm(
     goal_today: Optional[str],
     place: Optional[str],
     count: int = 6,
+    # Chills-based personalization fields
+    emotion_word: Optional[str] = None,
+    chills_detail: Optional[str] = None,
+    last_insight: Optional[str] = None,
+    chills_level: Optional[str] = None,
 ) -> List[schemas.ActivityBase]:
 
     context_bits: List[str] = []
@@ -144,6 +150,15 @@ def _generate_activities_via_llm(
         context_bits.append(f"preferred environment: {place}")
     if postal_code:
         context_bits.append(f"location_hint: {postal_code}")
+    
+    # Add chills-based context for better personalization
+    if emotion_word:
+        context_bits.append(f"emotion that resonated in last session: {emotion_word}")
+    if chills_detail:
+        context_bits.append(f"what triggered emotional response: {chills_detail}")
+    if last_insight:
+        insight_short = last_insight[:100] + "..." if len(last_insight) > 100 else last_insight
+        context_bits.append(f"user's recent reflection: {insight_short}")
 
 
     nearby_parks: List[str] = []
@@ -202,6 +217,30 @@ def _generate_activities_via_llm(
 
     context_text = "; ".join(context_bits) or "no extra context provided"
 
+    # Build chills-based personalization hint for the system message
+    chills_hint = ""
+    if emotion_word or chills_detail or last_insight:
+        chills_hint = (
+            "\n\nPERSONALIZATION FROM LAST SESSION:\n"
+            "The user had an emotional response in their last journey session. "
+            "Design activities that build on what resonated with them:\n"
+        )
+        if emotion_word:
+            chills_hint += f"- They felt '{emotion_word}' strongly\n"
+        if chills_detail:
+            chills_hint += f"- What triggered it: '{chills_detail}'\n"
+        if last_insight:
+            insight_short = last_insight[:150] + "..." if len(last_insight) > 150 else last_insight
+            chills_hint += f"- Their reflection: '{insight_short}'\n"
+        chills_hint += (
+            "Use this context to suggest activities that continue or deepen "
+            "the emotional thread they connected with.\n"
+        )
+        if chills_level == "high":
+            chills_hint += "They responded strongly - suggest activities that build on this momentum.\n"
+        elif chills_level == "medium":
+            chills_hint += "They noticed subtle shifts - suggest gentle activities that continue this exploration.\n"
+
     system_msg = (
         "You are a behavioural activation coach designing very small, realistic, "
         "real-world activities for a mental health app.\n"
@@ -220,6 +259,7 @@ def _generate_activities_via_llm(
         "Where possible, vary the place types across the 3 place-based activities.\n\n"
         "You can use BA flavours like Movement, Connection, Creative, Grounding, "
         "or Self-compassion. Use tags to encode this.\n"
+        f"{chills_hint}"
     )
 
     user_msg = (
@@ -407,17 +447,46 @@ def _get_current_activity(db: Session, *, user_hash: str) -> Optional[models.Act
 
 
 def _fallback_context_from_history(db: Session, user_hash: Optional[str]) -> dict:
-
+    """
+    Get context for activity generation from user history.
+    
+    For Day 2+ users: Uses chills-based context from last session's feedback
+    (emotion_word, session_insight, chills_detail) instead of mini check-in.
+    
+    Falls back to session/activity history if no feedback available.
+    """
     out = {
         "postal_code": None,
         "schema_hint": None,
         "mood": None,
         "goal_today": None,
         "place": None,
+        # Chills-based fields
+        "emotion_word": None,
+        "chills_detail": None,
+        "last_insight": None,
+        "chills_level": None,
     }
     if not user_hash:
         return out
 
+    # First, try to get chills-based context from last session's feedback
+    chills_ctx = narrative_service.get_chills_context_for_generation(db, user_hash)
+    
+    # If we have chills context with meaningful data, use it
+    if chills_ctx.get("feeling") or chills_ctx.get("last_insight") or chills_ctx.get("emotion_word"):
+        out["mood"] = chills_ctx.get("feeling")
+        out["schema_hint"] = chills_ctx.get("schema_choice")
+        out["postal_code"] = chills_ctx.get("postal_code")
+        out["goal_today"] = chills_ctx.get("goal_today")
+        out["place"] = chills_ctx.get("place")
+        out["emotion_word"] = chills_ctx.get("emotion_word")
+        out["chills_detail"] = chills_ctx.get("chills_detail")
+        out["last_insight"] = chills_ctx.get("last_insight")
+        out["chills_level"] = chills_ctx.get("chills_level")
+        return out
+
+    # Fallback to old behavior if no chills context
     try:
         # user profile postal_code if present
         u = db.query(models.Users).filter(models.Users.user_hash == user_hash).first()
@@ -517,7 +586,11 @@ def get_recommendation(
     db: Session = Depends(get_db),
 ):
 
-
+    # Chills-based fields for personalization
+    emotion_word: Optional[str] = None
+    chills_detail: Optional[str] = None
+    last_insight: Optional[str] = None
+    chills_level: Optional[str] = None
 
     if user_hash:
         fb = _fallback_context_from_history(db, user_hash)
@@ -530,6 +603,11 @@ def get_recommendation(
         mood = eff(mood, fb.get("mood"))
         goal_today = eff(goal_today, fb.get("goal_today"))
         place = eff(place, fb.get("place"))
+        # Get chills-based fields
+        emotion_word = fb.get("emotion_word")
+        chills_detail = fb.get("chills_detail")
+        last_insight = fb.get("last_insight")
+        chills_level = fb.get("chills_level")
 
     print(f"[activity] /recommendation called with postal_code='{postal_code}'")
 
@@ -540,6 +618,11 @@ def get_recommendation(
         goal_today=goal_today,
         place=place,
         count=6,
+        # Pass chills-based fields for personalization
+        emotion_word=emotion_word,
+        chills_detail=chills_detail,
+        last_insight=last_insight,
+        chills_level=chills_level,
     )
 
     rows = _store_generated_activities(db, activities=generated)
