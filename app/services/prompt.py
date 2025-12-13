@@ -246,7 +246,7 @@ def build(j: dict, target_words: int | None = None) -> str:
         else:
             pos = "toward the later part of the track"
         drop_hint = (
-            f"- There is a musical "drop" or stronger change in energy {pos}. "
+            f"- There is a musical 'drop' or stronger change in energy {pos}. "
             "Place ONE punchy, memorable sentence shortly BEFORE that emotional high point, "
             "then add a [pause] so it can land.\n"
         )
