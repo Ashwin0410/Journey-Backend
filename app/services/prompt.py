@@ -1,4 +1,3 @@
-
 from textwrap import dedent
 
 
@@ -85,35 +84,50 @@ def choose_arc(j: dict) -> str:
     goal = str(j.get("goal_today") or "").lower()
     schema = str(j.get("schema_choice") or "").lower()
     day = j.get("journey_day")
-
     
+    # Chills-based context from last session
+    emotion_word = str(j.get("emotion_word") or "").lower()
+    chills_detail = str(j.get("chills_detail") or "").lower()
+    chills_level = str(j.get("chills_level") or "").lower()
+    had_chills = j.get("had_chills", False)
+
+    # If user had strong chills with certain emotions, lean into arcs that amplify those
+    if had_chills and chills_level in ("high", "medium"):
+        # Hope/relief emotions -> continue with uplifting arcs
+        if any(k in emotion_word for k in ["hope", "relief", "calm", "peace", "light", "free", "open"]):
+            return "rags_to_riches"
+        # Connection emotions -> cinderella (rises, dips, rises higher)
+        if any(k in emotion_word for k in ["connect", "seen", "understood", "belong", "love", "close"]):
+            return "cinderella"
+        # Insight/clarity emotions -> oedipus (understanding and acceptance)
+        if any(k in emotion_word for k in ["clarity", "insight", "understand", "realiz", "truth", "honest"]):
+            return "oedipus"
+        # Strength/power emotions -> icarus (intensity then integration)
+        if any(k in emotion_word for k in ["strong", "power", "capable", "brave", "confident"]):
+            return "icarus"
+
+    # Original mood-based logic (unchanged)
     if any(k in mood for k in ["stuck", "hopeless", "empty", "worthless", "numb"]):
         return "rags_to_riches"
 
-    
     if any(k in mood for k in ["ashamed", "guilty", "failure", "embarrassed"]) or \
        any(k in schema for k in ["defectiveness", "shame"]):
         return "man_in_a_hole"
 
-    
     if any(k in mood for k in ["excited", "pumped", "energised", "energized"]) and \
        any(k in mood for k in ["afraid", "scared", "anxious", "nervous"]):
         return "icarus"
 
-    
     if any(k in goal for k in ["understand", "make sense", "see pattern"]) or \
        "pattern" in hard or "why i" in hard:
         return "oedipus"
 
-    
     if any(k in hard for k in ["loss", "grief", "bereavement", "breakup", "break-up"]):
         return "tragedy"
 
-    
     if any(k in goal for k in ["restart", "second chance", "new start", "fresh start"]):
         return "cinderella"
 
-    
     if day == 1:
         return "rags_to_riches"
     if day == 2:
@@ -136,8 +150,46 @@ def _day_theme(d: int | None) -> str:
         return ("Slow, steady recovery; routines, people, and meaning are starting to support them more regularly.")
     if d == 5:
         return ("Emergence; they can see both who they were and who they are becoming, with some gratitude and honesty.")
-    return ("Grounded, warm story with emotional depth but no drama for drama’s sake. "
+    return ("Grounded, warm story with emotional depth but no drama for drama's sake. "
             "Prefer clear scenes over abstract explanations.")
+
+
+def _build_chills_context(j: dict) -> str:
+    """
+    Build a prompt section that incorporates chills-based personalization
+    from the user's last session feedback.
+    """
+    emotion_word = j.get("emotion_word")
+    chills_detail = j.get("chills_detail")
+    last_insight = j.get("last_insight")
+    chills_level = j.get("chills_level")
+    had_chills = j.get("had_chills", False)
+    
+    if not had_chills and not last_insight:
+        return ""
+    
+    lines = []
+    
+    if had_chills and emotion_word:
+        lines.append(f"- In their last journey, they experienced a moment of \"{emotion_word}\" that resonated deeply.")
+    
+    if chills_detail:
+        lines.append(f"- What triggered that moment: \"{chills_detail}\". Weave a similar emotional thread into this story.")
+    
+    if last_insight:
+        # Truncate if too long
+        insight_short = last_insight[:150] + "..." if len(last_insight) > 150 else last_insight
+        lines.append(f"- Their recent reflection: \"{insight_short}\". Let the story gently acknowledge this inner work.")
+    
+    if chills_level == "high":
+        lines.append("- They responded strongly to emotional moments last time. Include at least one powerful, memorable line.")
+    elif chills_level == "medium":
+        lines.append("- They noticed subtle shifts last time. Include quiet but meaningful moments of change.")
+    
+    if not lines:
+        return ""
+    
+    return "\n    Personalization from last session:\n    " + "\n    ".join(lines) + "\n"
 
 
 def build(j: dict, target_words: int | None = None) -> str:
@@ -194,10 +246,13 @@ def build(j: dict, target_words: int | None = None) -> str:
         else:
             pos = "toward the later part of the track"
         drop_hint = (
-            f"- There is a musical “drop” or stronger change in energy {pos}. "
+            f"- There is a musical "drop" or stronger change in energy {pos}. "
             "Place ONE punchy, memorable sentence shortly BEFORE that emotional high point, "
             "then add a [pause] so it can land.\n"
         )
+
+    # Build chills-based personalization section
+    chills_context = _build_chills_context(j)
 
     return dedent(f"""
     Write a single continuous spoken script for Journey Day {d or 0}.
@@ -223,7 +278,7 @@ def build(j: dict, target_words: int | None = None) -> str:
     - Today they try a small concrete action: "{goal}" because "{why}".
     - They have had a recent small win: "{win}".
     - The hard thing in the background is: "{hard}".
-
+    {chills_context}
     Voice & perspective:
     - Use third person almost all the time (for example: "They wake up with a familiar heaviness...").
     - Do NOT give the character a specific name; refer to them only as "they" / "them".
@@ -255,12 +310,12 @@ def build(j: dict, target_words: int | None = None) -> str:
     - Weave the recent win "{win}" into the story as a quiet sign that change is already happening.
     - Let the small action "{goal}" appear in one or two very concrete scenes (where they are, what time of day, what they actually do).
     - Acknowledge schema "{schema}" only once, as something that used to narrow the character's world.
-    - Gently contradict it once by showing the character doing something that doesn’t fit the schema.
+    - Gently contradict it once by showing the character doing something that doesn't fit the schema.
     - Use phrases and details that feel close to the intake answers instead of generic self-help language.
 
     High-level pacing (to align with music and the emotional arc above):
-    - Opening: a spacious beginning with short lines that drop us straight into a moment in the character’s day. Allow room for the music, with at least one early "[pause]". Let this part match the starting point of the {arc_label} arc.
-    - Middle: the character experiments with their small action and notices subtle shifts (internal or external). Let the rhythm build a little here in line with the arc’s middle section, including a few "[pause]" beats so the listener can feel the shifts.
+    - Opening: a spacious beginning with short lines that drop us straight into a moment in the character's day. Allow room for the music, with at least one early "[pause]". Let this part match the starting point of the {arc_label} arc.
+    - Middle: the character experiments with their small action and notices subtle shifts (internal or external). Let the rhythm build a little here in line with the arc's middle section, including a few "[pause]" beats so the listener can feel the shifts.
     - Emotional "climax": include ONE clearly cinematic, punchy sentence that feels like a turning point in the story, shortly before the musical high point. Place a "[pause]" immediately after it so it can land.
     - Closing: gently land the story in a calmer, grounded place that matches the final part of the {arc_label} arc. The last one or two sentences can hint that the listener might carry something similar into their own day, using at most one "you" sentence.
 
