@@ -105,6 +105,10 @@ def _pick_schema_label(db: Session, user_hash: str) -> Optional[str]:
 
 
 def _last_session_feedback(db: Session, user_hash: str) -> Dict[str, Any]:
+    """
+    Get the last session and its feedback for a user.
+    Returns session info including mood, schema_hint, and full feedback data.
+    """
     session = (
         db.query(models.Sessions)
         .filter(models.Sessions.user_hash == user_hash)
@@ -114,6 +118,8 @@ def _last_session_feedback(db: Session, user_hash: str) -> Dict[str, Any]:
     if not session:
         return {
             "has_session": False,
+            "session_id": None,
+            "track_id": None,
             "mood": None,
             "schema_hint": None,
             "feedback": None,
@@ -139,10 +145,119 @@ def _last_session_feedback(db: Session, user_hash: str) -> Dict[str, Any]:
 
     return {
         "has_session": True,
+        "session_id": session.id,
+        "track_id": session.track_id,
         "mood": session.mood,
         "schema_hint": session.schema_hint or None,
         "feedback": feedback_obj,
     }
+
+
+def get_chills_context_for_generation(db: Session, user_hash: Optional[str]) -> Dict[str, Any]:
+    """
+    Get chills-based context from the last session's feedback for use in 
+    journey generation and activity recommendations.
+    
+    This replaces the mini check-in data with insights from the user's
+    last session feedback (chills, emotion_word, session_insight, etc.)
+    
+    Returns a dict with:
+        - feeling: derived from emotion_word or mood
+        - schema_choice: from last session's schema_hint
+        - goal_today: derived from session_insight (what user wants to focus on)
+        - last_insight: the session_insight text for context
+        - chills_level: none/low/medium/high based on chills_option
+        - emotion_word: what emotion resonated
+        - chills_detail: specific trigger for chills
+        - had_chills: boolean
+        - postal_code: from clinical intake
+        - place: inferred from chills_detail or default
+    """
+    out = {
+        "feeling": None,
+        "schema_choice": None,
+        "goal_today": None,
+        "last_insight": None,
+        "chills_level": "none",
+        "emotion_word": None,
+        "chills_detail": None,
+        "had_chills": False,
+        "postal_code": None,
+        "place": None,
+    }
+    
+    if not user_hash:
+        return out
+    
+    # Get last session feedback
+    session_info = _last_session_feedback(db, user_hash)
+    
+    if not session_info.get("has_session"):
+        return out
+    
+    # Extract from session
+    out["schema_choice"] = session_info.get("schema_hint")
+    
+    # Get feedback data
+    feedback = session_info.get("feedback")
+    if feedback:
+        # Emotion word becomes the "feeling" for next session
+        emotion_word = feedback.get("emotion_word")
+        if emotion_word:
+            out["emotion_word"] = emotion_word
+            out["feeling"] = emotion_word  # Use emotion as feeling
+        
+        # Session insight becomes context for goal
+        session_insight = feedback.get("session_insight")
+        if session_insight:
+            out["last_insight"] = session_insight
+            # Use insight to inform goal (what the user reflected on)
+            out["goal_today"] = session_insight[:200] if len(session_insight) > 200 else session_insight
+        
+        # Chills detail provides specific trigger info
+        chills_detail = feedback.get("chills_detail")
+        if chills_detail:
+            out["chills_detail"] = chills_detail
+        
+        # Determine chills level from chills_option
+        chills_option = feedback.get("chills_option")
+        if chills_option:
+            if chills_option in ("many", "yes", "several"):
+                out["chills_level"] = "high"
+                out["had_chills"] = True
+            elif chills_option in ("one_or_two", "subtle"):
+                out["chills_level"] = "medium"
+                out["had_chills"] = True
+            else:
+                out["chills_level"] = "none"
+                out["had_chills"] = False
+        
+        # Also check numeric chills value
+        chills_numeric = feedback.get("chills")
+        if chills_numeric and chills_numeric > 0:
+            out["had_chills"] = True
+            if chills_numeric >= 3:
+                out["chills_level"] = "high"
+            elif chills_numeric >= 1:
+                out["chills_level"] = "medium"
+    
+    # If no emotion from feedback, fall back to session mood
+    if not out["feeling"] and session_info.get("mood"):
+        out["feeling"] = session_info.get("mood")
+    
+    # Get postal code from clinical intake
+    out["postal_code"] = _extract_postal_code(db, user_hash)
+    
+    # Try to infer place preference from chills_detail
+    # (e.g., if they mentioned "walking in the park", prefer outdoors)
+    if out["chills_detail"]:
+        detail_lower = out["chills_detail"].lower()
+        if any(word in detail_lower for word in ["outside", "park", "walk", "nature", "garden", "fresh air"]):
+            out["place"] = "outdoors"
+        elif any(word in detail_lower for word in ["home", "couch", "bed", "room", "inside"]):
+            out["place"] = "indoors"
+    
+    return out
 
 
 def _build_hero_narrative(
@@ -157,7 +272,7 @@ def _build_hero_narrative(
     mood_phrase = mood or "mixed"
 
     base = (
-        f"You’re quietly collecting evidence that you’re more than {schema_phrase}. "
+        f"You're quietly collecting evidence that you're more than {schema_phrase}. "
         f"Even on {mood_phrase} days, the fact that {name_piece} keeps showing up "
         "is proof of agency, not failure."
     )
@@ -184,7 +299,7 @@ def _build_hero_narrative(
     else:
         text = (
             base
-            + " You’re building a track record of small, boring, solid evidence that you can move "
+            + " You're building a track record of small, boring, solid evidence that you can move "
               "through this, one step at a time."
         )
 
