@@ -108,7 +108,14 @@ def _build_continue_prompt(base_json: dict, last_tail: str, need_more: int) -> s
 
 
 def _fallback_from_history(q: Session, user_hash: str | None) -> dict:
-
+    """
+    Get context for journey generation from user history.
+    
+    For Day 2+ users: Uses chills-based context from last session's feedback
+    (emotion_word, session_insight, chills_detail) instead of mini check-in.
+    
+    Falls back to session/activity history if no feedback available.
+    """
     out = {
         "feeling": None,
         "schema_choice": None,
@@ -116,41 +123,66 @@ def _fallback_from_history(q: Session, user_hash: str | None) -> dict:
         "goal_today": None,
         "place": None,
         "journey_day": None,
+        # New chills-based fields
+        "last_insight": None,
+        "chills_level": None,
+        "emotion_word": None,
+        "chills_detail": None,
+        "had_chills": False,
     }
     if not user_hash:
         return out
 
-    last_sess = (
-        q.query(Sessions)
-        .filter(Sessions.user_hash == user_hash)
-        .order_by(Sessions.created_at.desc())
-        .first()
-    )
-    if last_sess:
-        out["feeling"] = last_sess.mood or out["feeling"]
-        out["schema_choice"] = last_sess.schema_hint or out["schema_choice"]
+    # First, try to get chills-based context from last session's feedback
+    chills_ctx = narrative_service.get_chills_context_for_generation(q, user_hash)
+    
+    # If we have chills context with meaningful data, use it
+    if chills_ctx.get("feeling") or chills_ctx.get("last_insight") or chills_ctx.get("emotion_word"):
+        out["feeling"] = chills_ctx.get("feeling")
+        out["schema_choice"] = chills_ctx.get("schema_choice")
+        out["postal_code"] = chills_ctx.get("postal_code")
+        out["goal_today"] = chills_ctx.get("goal_today")
+        out["place"] = chills_ctx.get("place")
+        out["last_insight"] = chills_ctx.get("last_insight")
+        out["chills_level"] = chills_ctx.get("chills_level")
+        out["emotion_word"] = chills_ctx.get("emotion_word")
+        out["chills_detail"] = chills_ctx.get("chills_detail")
+        out["had_chills"] = chills_ctx.get("had_chills", False)
+    else:
+        # Fallback to old behavior: get from last session directly
+        last_sess = (
+            q.query(Sessions)
+            .filter(Sessions.user_hash == user_hash)
+            .order_by(Sessions.created_at.desc())
+            .first()
+        )
+        if last_sess:
+            out["feeling"] = last_sess.mood or out["feeling"]
+            out["schema_choice"] = last_sess.schema_hint or out["schema_choice"]
 
+        # Try to get place/goal from activity history
+        try:
+            asess = (
+                q.query(ActivitySessions)
+                .filter(ActivitySessions.user_hash == user_hash)
+                .order_by(ActivitySessions.started_at.desc())
+                .first()
+            )
+            if asess:
+                act = q.query(Activities).filter(Activities.id == asess.activity_id).first()
+                if act:
+                    out["goal_today"] = getattr(act, "title", None) or out["goal_today"]
+                    out["place"] = getattr(act, "location_label", None) or out["place"]
+        except Exception:
+            pass
+
+    # Always try to get journey_day and postal_code from user record
     try:
         u = q.query(Users).filter(Users.user_hash == user_hash).first()
         if u and getattr(u, "postal_code", None):
             out["postal_code"] = getattr(u, "postal_code")
         if u and getattr(u, "journey_day", None):
             out["journey_day"] = getattr(u, "journey_day")
-    except Exception:
-        pass
-
-    try:
-        asess = (
-            q.query(ActivitySessions)
-            .filter(ActivitySessions.user_hash == user_hash)
-            .order_by(ActivitySessions.started_at.desc())
-            .first()
-        )
-        if asess:
-            act = q.query(Activities).filter(Activities.id == asess.activity_id).first()
-            if act:
-                out["goal_today"] = getattr(act, "title", None) or out["goal_today"]
-                out["place"] = getattr(act, "location_label", None) or out["place"]
     except Exception:
         pass
 
@@ -180,6 +212,12 @@ def generate(x: IntakeIn, q: Session = Depends(db)):
         "goal_today": eff(getattr(x, "goal_today", None), fb.get("goal_today"), "show up for the day"),
         "place": eff(getattr(x, "place", None), fb.get("place"), None),
         "journey_day": getattr(x, "journey_day", None) or fb.get("journey_day", None),
+        # New chills-based fields for prompt building
+        "last_insight": fb.get("last_insight"),
+        "chills_level": fb.get("chills_level"),
+        "emotion_word": fb.get("emotion_word"),
+        "chills_detail": fb.get("chills_detail"),
+        "had_chills": fb.get("had_chills", False),
     }
 
     # ISSUE 8: Check if Day 1 - return static audio without generation
@@ -205,7 +243,7 @@ def generate(x: IntakeIn, q: Session = Depends(db)):
         day1_script = "Welcome to your first journey with ReWire. This is the beginning of something meaningful."
         q.add(Scripts(session_id=session_id, script_text=day1_script))
         
-        # Save mini check-in snapshot
+        # Save mini check-in snapshot (keeping for Day 1 since no prior feedback exists)
         try:
             if x.user_hash:
                 q.add(
@@ -281,6 +319,13 @@ def generate(x: IntakeIn, q: Session = Depends(db)):
     jdict["postal_code"] = effective["postal_code"]
     jdict["goal_today"] = effective["goal_today"]
     jdict["place"] = effective["place"]
+    
+    # Add chills-based fields for prompt building
+    jdict["last_insight"] = effective.get("last_insight")
+    jdict["chills_level"] = effective.get("chills_level")
+    jdict["emotion_word"] = effective.get("emotion_word")
+    jdict["chills_detail"] = effective.get("chills_detail")
+    jdict["had_chills"] = effective.get("had_chills", False)
 
     
     arc_name = pr.choose_arc(jdict)
@@ -378,23 +423,33 @@ def generate(x: IntakeIn, q: Session = Depends(db)):
     q.add(Scripts(session_id=session_id, script_text=best_script))
 
     
+    # For Day 2+, we no longer need mini check-in since we use feedback from last session
+    # But we still save it for record-keeping if data was provided
     try:
         if x.user_hash:
-            q.add(
-                MiniCheckins(
-                    user_hash=x.user_hash,
-                    feeling=getattr(x, "feeling", None),
-                    body=getattr(x, "body", None),
-                    energy=getattr(x, "energy", None),
-                    goal_today=getattr(x, "goal_today", None),
-                    why_goal=getattr(x, "why_goal", None),
-                    last_win=getattr(x, "last_win", None),
-                    hard_thing=getattr(x, "hard_thing", None),
-                    schema_choice=effective["schema_choice"],
-                    postal_code=effective["postal_code"],
-                    place=getattr(x, "place", None) or effective["place"],
+            # Check if any check-in data was actually provided in the request
+            has_checkin_data = any([
+                getattr(x, "feeling", None),
+                getattr(x, "body", None),
+                getattr(x, "energy", None),
+                getattr(x, "goal_today", None),
+            ])
+            if has_checkin_data:
+                q.add(
+                    MiniCheckins(
+                        user_hash=x.user_hash,
+                        feeling=getattr(x, "feeling", None),
+                        body=getattr(x, "body", None),
+                        energy=getattr(x, "energy", None),
+                        goal_today=getattr(x, "goal_today", None),
+                        why_goal=getattr(x, "why_goal", None),
+                        last_win=getattr(x, "last_win", None),
+                        hard_thing=getattr(x, "hard_thing", None),
+                        schema_choice=effective["schema_choice"],
+                        postal_code=effective["postal_code"],
+                        place=getattr(x, "place", None) or effective["place"],
+                    )
                 )
-            )
     except Exception:
         # don't fail journey creation on snapshot errors
         pass
