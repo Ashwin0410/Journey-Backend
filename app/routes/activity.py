@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 from datetime import datetime
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 
 import requests
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -71,14 +71,20 @@ def _distance_meters(lat1: float, lng1: float, lat2: float, lng2: float) -> floa
     return R * c_
 
 
+# Type alias for place details
+PlaceDetail = Dict[str, any]  # {"name": str, "lat": float, "lng": float, "place_id": str}
+
+
 def _nearby_places(
     lat: float,
     lng: float,
     place_type: str,
     radius_m: int = 1200,
     max_results: int = 5,
-) -> List[str]:
-
+) -> List[PlaceDetail]:
+    """
+    Returns list of place details with name, lat, lng, and place_id.
+    """
     if not c.GOOGLE_MAPS_API_KEY:
         return []
 
@@ -99,16 +105,17 @@ def _nearby_places(
         return []
 
     results = data.get("results") or []
-    names: List[str] = []
+    places: List[PlaceDetail] = []
 
     for r_ in results:
-        if len(names) >= max_results:
+        if len(places) >= max_results:
             break
 
         name = r_.get("name")
         loc = (r_.get("geometry") or {}).get("location") or {}
         lat2 = loc.get("lat")
         lng2 = loc.get("lng")
+        place_id = r_.get("place_id")
 
         if not name or lat2 is None or lng2 is None:
             continue
@@ -117,9 +124,43 @@ def _nearby_places(
         if dist > radius_m:
             continue
 
-        names.append(name.strip())
+        places.append({
+            "name": name.strip(),
+            "lat": float(lat2),
+            "lng": float(lng2),
+            "place_id": place_id or "",
+        })
 
-    return names
+    return places
+
+
+def _get_place_names(places: List[PlaceDetail]) -> List[str]:
+    """Extract just the names from place details for LLM prompt."""
+    return [p["name"] for p in places]
+
+
+def _find_place_by_name(name: str, all_places: List[PlaceDetail]) -> Optional[PlaceDetail]:
+    """
+    Find a place by name (case-insensitive, partial match).
+    Returns the place details if found, None otherwise.
+    """
+    if not name or not all_places:
+        return None
+    
+    name_lower = name.lower().strip()
+    
+    # First try exact match
+    for p in all_places:
+        if p["name"].lower().strip() == name_lower:
+            return p
+    
+    # Then try partial match (place name contains the search term or vice versa)
+    for p in all_places:
+        p_name_lower = p["name"].lower().strip()
+        if name_lower in p_name_lower or p_name_lower in name_lower:
+            return p
+    
+    return None
 
 
 
@@ -161,13 +202,14 @@ def _generate_activities_via_llm(
         context_bits.append(f"user's recent reflection: {insight_short}")
 
 
-    nearby_parks: List[str] = []
-    nearby_cafes: List[str] = []
-    nearby_attractions: List[str] = []
-    nearby_malls: List[str] = []
-    nearby_theatres: List[str] = []
-    nearby_libraries: List[str] = []
-    nearby_gyms: List[str] = []
+    # Store full place details (with coordinates) not just names
+    nearby_parks: List[PlaceDetail] = []
+    nearby_cafes: List[PlaceDetail] = []
+    nearby_attractions: List[PlaceDetail] = []
+    nearby_malls: List[PlaceDetail] = []
+    nearby_theatres: List[PlaceDetail] = []
+    nearby_libraries: List[PlaceDetail] = []
+    nearby_gyms: List[PlaceDetail] = []
 
     coords: Optional[Tuple[float, float]] = None
     if postal_code:
@@ -184,22 +226,32 @@ def _generate_activities_via_llm(
         nearby_libraries = _nearby_places(lat, lng, "library", max_results=5)
         nearby_gyms = _nearby_places(lat, lng, "gym", max_results=5)
 
-        if nearby_parks:
-            context_bits.append("nearby_parks: " + ", ".join(nearby_parks))
-        if nearby_cafes:
-            context_bits.append("nearby_cafes: " + ", ".join(nearby_cafes))
-        if nearby_attractions:
-            context_bits.append("nearby_attractions: " + ", ".join(nearby_attractions))
-        if nearby_malls:
-            context_bits.append("nearby_malls: " + ", ".join(nearby_malls))
-        if nearby_theatres:
-            context_bits.append("nearby_theatres: " + ", ".join(nearby_theatres))
-        if nearby_libraries:
-            context_bits.append("nearby_libraries: " + ", ".join(nearby_libraries))
-        if nearby_gyms:
-            context_bits.append("nearby_gyms: " + ", ".join(nearby_gyms))
+        # Extract names for LLM prompt
+        park_names = _get_place_names(nearby_parks)
+        cafe_names = _get_place_names(nearby_cafes)
+        attraction_names = _get_place_names(nearby_attractions)
+        mall_names = _get_place_names(nearby_malls)
+        theatre_names = _get_place_names(nearby_theatres)
+        library_names = _get_place_names(nearby_libraries)
+        gym_names = _get_place_names(nearby_gyms)
 
-    all_nearby_places: List[str] = (
+        if park_names:
+            context_bits.append("nearby_parks: " + ", ".join(park_names))
+        if cafe_names:
+            context_bits.append("nearby_cafes: " + ", ".join(cafe_names))
+        if attraction_names:
+            context_bits.append("nearby_attractions: " + ", ".join(attraction_names))
+        if mall_names:
+            context_bits.append("nearby_malls: " + ", ".join(mall_names))
+        if theatre_names:
+            context_bits.append("nearby_theatres: " + ", ".join(theatre_names))
+        if library_names:
+            context_bits.append("nearby_libraries: " + ", ".join(library_names))
+        if gym_names:
+            context_bits.append("nearby_gyms: " + ", ".join(gym_names))
+
+    # Combine all places for coordinate lookup later
+    all_nearby_places: List[PlaceDetail] = (
         nearby_parks
         + nearby_cafes
         + nearby_attractions
@@ -338,6 +390,18 @@ def _generate_activities_via_llm(
             if not location_label:
                 location_label = "at home"
 
+            # Try to find coordinates for this location
+            lat: Optional[float] = None
+            lng: Optional[float] = None
+            place_id: Optional[str] = None
+            
+            # Look up place details if location_label matches a nearby place
+            place_detail = _find_place_by_name(location_label, all_nearby_places)
+            if place_detail:
+                lat = place_detail["lat"]
+                lng = place_detail["lng"]
+                place_id = place_detail["place_id"]
+
             act = schemas.ActivityBase(
                 title=title,
                 description=description,
@@ -347,6 +411,9 @@ def _generate_activities_via_llm(
                 default_duration_min=default_duration_min,
                 location_label=location_label,
                 tags=tags,
+                lat=lat,
+                lng=lng,
+                place_id=place_id,
             )
             activities.append(act)
         except Exception as e:
@@ -382,6 +449,9 @@ def _store_generated_activities(
             tags_json=json.dumps(a.tags or []),
             is_active=True,
             created_at=now,
+            lat=a.lat,
+            lng=a.lng,
+            place_id=a.place_id,
         )
         db.add(row)
         rows.append(row)
@@ -411,6 +481,9 @@ def _to_activity_out(act: models.Activities) -> schemas.ActivityRecommendationOu
         default_duration_min=act.default_duration_min,
         location_label=act.location_label,
         tags=tags,
+        lat=act.lat,
+        lng=act.lng,
+        place_id=act.place_id,
     )
 
 
@@ -701,6 +774,9 @@ def get_library(
                 default_duration_min=a.default_duration_min,
                 location_label=a.location_label,
                 tags=tags,
+                lat=a.lat,
+                lng=a.lng,
+                place_id=a.place_id,
             )
         )
 
