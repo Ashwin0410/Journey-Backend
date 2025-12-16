@@ -73,6 +73,10 @@ class ActivityBase(BaseModel):
     default_duration_min: int | None = None
     location_label: str | None = None
     tags: List[str] | None = None
+    # Google Maps coordinates for directions
+    lat: float | None = None
+    lng: float | None = None
+    place_id: str | None = None
 
 
 class ActivityOut(ActivityBase):
@@ -187,6 +191,8 @@ class WeeklyPlanIn(BaseModel):
 
 class IntakeFullIn(BaseModel):
     
+    # Pre-intake question: "Has anything been on your mind lately?"
+    pre_intake_text: Optional[str] = None
     
     age: Optional[int] = None
     postal_code: Optional[str] = None
@@ -223,6 +229,9 @@ class IntakeFullOut(BaseModel):
     id: int
     user_hash: str
     created_at: datetime
+
+    # Pre-intake question: "Has anything been on your mind lately?"
+    pre_intake_text: Optional[str] = None
 
     age: Optional[int] = None
     postal_code: Optional[str] = None
@@ -365,3 +374,19 @@ class LoginIn(BaseModel):
     """Schema for user login with email and password."""
     email: str
     password: str
+
+
+# ============================================================================
+# PRE-INTAKE SCHEMAS
+# ============================================================================
+
+
+class PreIntakeIn(BaseModel):
+    """Schema for pre-intake 'on your mind' submission."""
+    pre_intake_text: str
+
+
+class PreIntakeOut(BaseModel):
+    """Schema for pre-intake response."""
+    success: bool
+    message: str
