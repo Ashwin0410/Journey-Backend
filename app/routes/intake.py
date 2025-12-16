@@ -46,6 +46,7 @@ def _build_intake_out(intake: models.ClinicalIntake, db: Session) -> schemas.Int
         id=intake.id,
         user_hash=intake.user_hash,
         created_at=intake.created_at,
+        pre_intake_text=intake.pre_intake_text,
         age=intake.age,
         postal_code=intake.postal_code,
         gender=intake.gender,
@@ -86,6 +87,47 @@ def _build_intake_out(intake: models.ClinicalIntake, db: Session) -> schemas.Int
     )
 
 
+@r.post("/pre-intake", response_model=schemas.PreIntakeOut)
+def submit_pre_intake(
+    payload: schemas.PreIntakeIn,
+    current_user: models.Users = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Store the pre-intake 'on your mind' text.
+    Creates a new ClinicalIntake record with just the pre_intake_text,
+    or updates an existing incomplete one.
+    """
+    user_hash = current_user.user_hash
+
+    # Check if there's an existing intake for this user that we can update
+    # (in case they go back and forth during onboarding)
+    existing_intake = (
+        db.query(models.ClinicalIntake)
+        .filter(models.ClinicalIntake.user_hash == user_hash)
+        .order_by(models.ClinicalIntake.created_at.desc())
+        .first()
+    )
+
+    if existing_intake:
+        # Update existing intake with pre_intake_text
+        existing_intake.pre_intake_text = payload.pre_intake_text
+        db.commit()
+    else:
+        # Create a new intake record with just the pre_intake_text
+        intake = models.ClinicalIntake(
+            user_hash=user_hash,
+            pre_intake_text=payload.pre_intake_text,
+        )
+        db.add(intake)
+        db.commit()
+
+    return schemas.PreIntakeOut(
+        success=True,
+        message="Pre-intake response saved successfully"
+    )
+
+
 @r.post("/full", response_model=schemas.IntakeFullOut)
 def submit_full_intake(
     payload: schemas.IntakeFullIn,
@@ -97,32 +139,68 @@ def submit_full_intake(
     user = current_user
     user_hash = user.user_hash
 
-    intake = models.ClinicalIntake(
-        user_hash=user_hash,
-        age=payload.age,
-        postal_code=payload.postal_code,
-        gender=payload.gender,
-        in_therapy=payload.in_therapy,
-        therapy_type=payload.therapy_type,
-        therapy_duration=payload.therapy_duration,
-        on_medication=payload.on_medication,
-        medication_list=payload.medication_list,
-        medication_duration=payload.medication_duration,
-        pregnant_or_planning=payload.pregnant_or_planning,
-        pregnant_notes=payload.pregnant_notes,
-        psychosis_history=payload.psychosis_history,
-        psychosis_notes=payload.psychosis_notes,
-        privacy_ack=payload.privacy_ack,
-        life_area=payload.weekly_plan.life_area,
-        life_focus=payload.weekly_plan.life_focus,
-        week_actions_json=json.dumps(payload.weekly_plan.actions),
-        week_plan_text=payload.weekly_plan.week_plan_text,
-        good_life_answer=payload.good_life_answer,
+    # Check if there's an existing intake (from pre-intake) to update
+    existing_intake = (
+        db.query(models.ClinicalIntake)
+        .filter(models.ClinicalIntake.user_hash == user_hash)
+        .order_by(models.ClinicalIntake.created_at.desc())
+        .first()
     )
 
-    db.add(intake)
-    db.commit()
-    db.refresh(intake)
+    if existing_intake and existing_intake.age is None:
+        # Update the existing pre-intake record with full intake data
+        intake = existing_intake
+        intake.pre_intake_text = payload.pre_intake_text if payload.pre_intake_text else intake.pre_intake_text
+        intake.age = payload.age
+        intake.postal_code = payload.postal_code
+        intake.gender = payload.gender
+        intake.in_therapy = payload.in_therapy
+        intake.therapy_type = payload.therapy_type
+        intake.therapy_duration = payload.therapy_duration
+        intake.on_medication = payload.on_medication
+        intake.medication_list = payload.medication_list
+        intake.medication_duration = payload.medication_duration
+        intake.pregnant_or_planning = payload.pregnant_or_planning
+        intake.pregnant_notes = payload.pregnant_notes
+        intake.psychosis_history = payload.psychosis_history
+        intake.psychosis_notes = payload.psychosis_notes
+        intake.privacy_ack = payload.privacy_ack
+        intake.life_area = payload.weekly_plan.life_area
+        intake.life_focus = payload.weekly_plan.life_focus
+        intake.week_actions_json = json.dumps(payload.weekly_plan.actions)
+        intake.week_plan_text = payload.weekly_plan.week_plan_text
+        intake.good_life_answer = payload.good_life_answer
+        db.commit()
+        db.refresh(intake)
+    else:
+        # Create a new intake record
+        intake = models.ClinicalIntake(
+            user_hash=user_hash,
+            pre_intake_text=payload.pre_intake_text,
+            age=payload.age,
+            postal_code=payload.postal_code,
+            gender=payload.gender,
+            in_therapy=payload.in_therapy,
+            therapy_type=payload.therapy_type,
+            therapy_duration=payload.therapy_duration,
+            on_medication=payload.on_medication,
+            medication_list=payload.medication_list,
+            medication_duration=payload.medication_duration,
+            pregnant_or_planning=payload.pregnant_or_planning,
+            pregnant_notes=payload.pregnant_notes,
+            psychosis_history=payload.psychosis_history,
+            psychosis_notes=payload.psychosis_notes,
+            privacy_ack=payload.privacy_ack,
+            life_area=payload.weekly_plan.life_area,
+            life_focus=payload.weekly_plan.life_focus,
+            week_actions_json=json.dumps(payload.weekly_plan.actions),
+            week_plan_text=payload.weekly_plan.week_plan_text,
+            good_life_answer=payload.good_life_answer,
+        )
+
+        db.add(intake)
+        db.commit()
+        db.refresh(intake)
 
     for item in payload.schema_items:
         db.add(
