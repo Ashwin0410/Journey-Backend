@@ -7,6 +7,7 @@ from sqlalchemy import (
     Date,
     Boolean,
     ForeignKey,
+    Float,
 )
 from sqlalchemy.sql import func
 
@@ -82,6 +83,11 @@ class Activities(Base):
     tags_json = Column(Text, nullable=True)         
     is_active = Column(Integer, default=1, index=True) 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Google Maps coordinates for directions
+    lat = Column(Float, nullable=True)
+    lng = Column(Float, nullable=True)
+    place_id = Column(String, nullable=True)  # Google Place ID for precise directions
 
 
 
@@ -148,6 +154,9 @@ class ClinicalIntake(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_hash = Column(String, index=True, nullable=False)
+
+    # Pre-intake question: "Has anything been on your mind lately?"
+    pre_intake_text = Column(Text, nullable=True)
 
     
     age = Column(Integer, nullable=True)
