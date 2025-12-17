@@ -56,6 +56,7 @@ from app.routes.intake_edit import r as intake_edit_r
 
 # Therapist Dashboard Routes (New)
 from app.routes.therapist_auth import r as therapist_auth_r
+from app.routes.therapist_patients import r as therapist_patients_r
 
 app.include_router(health_r)
 app.include_router(journey_r)
@@ -72,3 +73,4 @@ app.include_router(intake_edit_r)
 
 # Therapist Dashboard Routers (New)
 app.include_router(therapist_auth_r)
+app.include_router(therapist_patients_r)
