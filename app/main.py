@@ -31,13 +31,11 @@ app.add_middleware(
 )
 os.makedirs(c.out_dir_path, exist_ok=True)
 app.mount("/public", StaticFiles(directory=str(c.out_dir_path)), name="public")
-
 # ISSUE 8: Mount assets folder to serve static Day 1 audio (videoplayback.m4a)
 # This allows /assets/videoplayback.m4a to be accessible
 assets_path = Path(__file__).parent / "assets"
 if assets_path.exists():
     app.mount("/assets", StaticFiles(directory=str(assets_path)), name="assets")
-
 if Base is not None and engine is not None:
     try:
         Base.metadata.create_all(bind=engine)
@@ -55,6 +53,10 @@ from app.routes import auth as auth_routes
 from app.routes import intake as intake_routes  # NEW
 from app.routes.profile import r as profile_r
 from app.routes.intake_edit import r as intake_edit_r
+
+# Therapist Dashboard Routes (New)
+from app.routes.therapist_auth import r as therapist_auth_r
+
 app.include_router(health_r)
 app.include_router(journey_r)
 app.include_router(feedback_r)
@@ -67,3 +69,6 @@ app.include_router(auth_routes.r)
 app.include_router(intake_routes.r)
 app.include_router(profile_r)
 app.include_router(intake_edit_r)
+
+# Therapist Dashboard Routers (New)
+app.include_router(therapist_auth_r)
