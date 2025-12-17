@@ -251,3 +251,205 @@ class MiniCheckins(Base):
     place = Column(String, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+# =============================================================================
+# THERAPIST DASHBOARD MODELS (New)
+# =============================================================================
+
+
+class Therapists(Base):
+    """Therapist user accounts - separate from patient Users table"""
+    __tablename__ = "therapists"
+
+    id = Column(Integer, primary_key=True, index=True)
+    therapist_hash = Column(String, unique=True, index=True, nullable=False)
+
+    email = Column(String, unique=True, index=True, nullable=False)
+    name = Column(String, nullable=True)
+    title = Column(String, nullable=True)  # e.g., "Dr.", "Licensed Therapist"
+    
+    password_hash = Column(String, nullable=False)  # therapists use email/password only
+    
+    profile_image_url = Column(String, nullable=True)
+    specialty = Column(String, nullable=True)  # e.g., "CBT", "BA", "MI"
+    
+    # Settings stored as JSON
+    settings_json = Column(Text, nullable=True)  # notifications, defaults, etc.
+    
+    is_active = Column(Boolean, default=True, nullable=False)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class TherapistPatients(Base):
+    """Link table connecting therapists to their patients"""
+    __tablename__ = "therapist_patients"
+
+    id = Column(Integer, primary_key=True, index=True)
+    therapist_id = Column(
+        Integer,
+        ForeignKey("therapists.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    patient_user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    
+    # When this relationship was established
+    linked_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Therapist can set initial focus for patient
+    initial_focus = Column(String, nullable=True)  # e.g., "Social connection"
+    
+    # Status of the relationship
+    status = Column(String, default="active", index=True)  # active, paused, discharged
+    
+    # BA week tracking (therapist's view)
+    ba_week = Column(Integer, default=1)
+    ba_start_date = Column(Date, nullable=True)
+    
+    # Last session date with therapist (in-person/telehealth)
+    last_session_date = Column(Date, nullable=True)
+    next_session_date = Column(Date, nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class TherapistNotes(Base):
+    """Session notes written by therapist about a patient"""
+    __tablename__ = "therapist_notes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    therapist_id = Column(
+        Integer,
+        ForeignKey("therapists.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    patient_user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    
+    # Note content
+    note_text = Column(Text, nullable=False)
+    
+    # Optional: link to a specific session date
+    session_date = Column(Date, nullable=True)
+    
+    # Note type: session_note, follow_up, observation, etc.
+    note_type = Column(String, default="session_note", index=True)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class TherapistAIGuidance(Base):
+    """Therapist's guidance for how AI companion should interact with patient"""
+    __tablename__ = "therapist_ai_guidance"
+
+    id = Column(Integer, primary_key=True, index=True)
+    therapist_id = Column(
+        Integer,
+        ForeignKey("therapists.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    patient_user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    
+    # The guidance text that shapes AI responses
+    guidance_text = Column(Text, nullable=False)
+    
+    # Is this guidance currently active?
+    is_active = Column(Boolean, default=True)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class TherapistSuggestedActivities(Base):
+    """Activities suggested by therapist for a specific patient"""
+    __tablename__ = "therapist_suggested_activities"
+
+    id = Column(Integer, primary_key=True, index=True)
+    therapist_id = Column(
+        Integer,
+        ForeignKey("therapists.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    patient_user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    
+    # Activity details
+    title = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    
+    # Categorization
+    category = Column(String, nullable=True)  # Connection, Mastery, Physical, etc.
+    duration_minutes = Column(Integer, nullable=True)
+    barrier_level = Column(String, nullable=True)  # Low, Medium, High
+    
+    # Source/reason for suggestion
+    source_note = Column(String, nullable=True)  # e.g., "From her values", "Grounding"
+    
+    # Is this suggestion enabled (visible to patient)?
+    is_enabled = Column(Boolean, default=True)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class PatientInvites(Base):
+    """Invitations sent by therapists to patients"""
+    __tablename__ = "patient_invites"
+
+    id = Column(Integer, primary_key=True, index=True)
+    therapist_id = Column(
+        Integer,
+        ForeignKey("therapists.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    
+    # Invite details
+    patient_email = Column(String, index=True, nullable=False)
+    patient_name = Column(String, nullable=True)
+    initial_focus = Column(String, nullable=True)
+    
+    # Invite token for verification
+    invite_token = Column(String, unique=True, index=True, nullable=False)
+    
+    # Status: pending, accepted, expired, cancelled
+    status = Column(String, default="pending", index=True)
+    
+    # If accepted, link to the patient user
+    accepted_user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    
+    # Expiration
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    accepted_at = Column(DateTime(timezone=True), nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
