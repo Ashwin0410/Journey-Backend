@@ -43,13 +43,17 @@ def _generate_therapist_hash(email: str) -> str:
 
 
 def _hash_password(password: str) -> str:
-    """Hash a password using bcrypt."""
-    return pwd_context.hash(password)
+    """Hash a password using bcrypt. Truncates to 72 bytes (bcrypt limit)."""
+    # bcrypt has a 72-byte limit for passwords
+    password_truncated = password.encode('utf-8')[:72].decode('utf-8', errors='ignore')
+    return pwd_context.hash(password_truncated)
 
 
 def _verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a password against its hash."""
-    return pwd_context.verify(plain_password, hashed_password)
+    """Verify a password against its hash. Truncates to 72 bytes (bcrypt limit)."""
+    # bcrypt has a 72-byte limit for passwords
+    password_truncated = plain_password.encode('utf-8')[:72].decode('utf-8', errors='ignore')
+    return pwd_context.verify(password_truncated, hashed_password)
 
 
 # =============================================================================
