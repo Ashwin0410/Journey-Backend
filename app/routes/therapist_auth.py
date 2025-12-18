@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+import base64
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -43,17 +44,21 @@ def _generate_therapist_hash(email: str) -> str:
 
 
 def _hash_password(password: str) -> str:
-    """Hash a password using bcrypt. Truncates to 72 bytes (bcrypt limit)."""
-    # bcrypt has a 72-byte limit for passwords
-    password_truncated = password.encode('utf-8')[:72].decode('utf-8', errors='ignore')
-    return pwd_context.hash(password_truncated)
+    """Hash a password using bcrypt. Pre-hashes with SHA256 to handle any length."""
+    # Pre-hash with SHA256 to handle passwords of any length
+    # This is a common pattern to work around bcrypt's 72-byte limit
+    sha256_hash = hashlib.sha256(password.encode('utf-8')).digest()
+    # Base64 encode to get a safe string (44 chars, well under 72 bytes)
+    password_b64 = base64.b64encode(sha256_hash).decode('utf-8')
+    return pwd_context.hash(password_b64)
 
 
 def _verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a password against its hash. Truncates to 72 bytes (bcrypt limit)."""
-    # bcrypt has a 72-byte limit for passwords
-    password_truncated = plain_password.encode('utf-8')[:72].decode('utf-8', errors='ignore')
-    return pwd_context.verify(password_truncated, hashed_password)
+    """Verify a password against its hash. Pre-hashes with SHA256 to handle any length."""
+    # Pre-hash with SHA256 (same as during hashing)
+    sha256_hash = hashlib.sha256(plain_password.encode('utf-8')).digest()
+    password_b64 = base64.b64encode(sha256_hash).decode('utf-8')
+    return pwd_context.verify(password_b64, hashed_password)
 
 
 # =============================================================================
