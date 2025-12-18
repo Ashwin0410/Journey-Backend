@@ -44,21 +44,39 @@ def _generate_therapist_hash(email: str) -> str:
 
 
 def _hash_password(password: str) -> str:
-    """Hash a password using bcrypt. Pre-hashes with SHA256 to handle any length."""
+    """
+    Hash a password using bcrypt with SHA256 pre-hashing.
+    
+    This handles passwords of any length by first hashing with SHA256,
+    then base64 encoding (44 chars), which is well under bcrypt's 72-byte limit.
+    """
+    # Ensure password is a string and encode to bytes
+    password_bytes = password.encode('utf-8') if isinstance(password, str) else password
     # Pre-hash with SHA256 to handle passwords of any length
-    # This is a common pattern to work around bcrypt's 72-byte limit
-    sha256_hash = hashlib.sha256(password.encode('utf-8')).digest()
+    sha256_hash = hashlib.sha256(password_bytes).digest()
     # Base64 encode to get a safe string (44 chars, well under 72 bytes)
     password_b64 = base64.b64encode(sha256_hash).decode('utf-8')
-    return pwd_context.hash(password_b64)
+    # Extra safety: truncate to 72 bytes (though base64 of SHA256 is always 44 chars)
+    return pwd_context.hash(password_b64[:72])
 
 
 def _verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a password against its hash. Pre-hashes with SHA256 to handle any length."""
-    # Pre-hash with SHA256 (same as during hashing)
-    sha256_hash = hashlib.sha256(plain_password.encode('utf-8')).digest()
-    password_b64 = base64.b64encode(sha256_hash).decode('utf-8')
-    return pwd_context.verify(password_b64, hashed_password)
+    """
+    Verify a password against its hash using SHA256 pre-hashing.
+    
+    Must use the same pre-hashing method as _hash_password.
+    """
+    try:
+        # Ensure password is a string and encode to bytes
+        password_bytes = plain_password.encode('utf-8') if isinstance(plain_password, str) else plain_password
+        # Pre-hash with SHA256 (same as during hashing)
+        sha256_hash = hashlib.sha256(password_bytes).digest()
+        password_b64 = base64.b64encode(sha256_hash).decode('utf-8')
+        # Extra safety: truncate to 72 bytes
+        return pwd_context.verify(password_b64[:72], hashed_password)
+    except Exception:
+        # If verification fails for any reason (e.g., malformed hash), return False
+        return False
 
 
 # =============================================================================
@@ -87,6 +105,13 @@ def register_therapist(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered",
+        )
+    
+    # Validate password length
+    if len(payload.password) < 6:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must be at least 6 characters",
         )
     
     # Create therapist record
