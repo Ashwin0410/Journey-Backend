@@ -443,6 +443,82 @@ def remove_patient(
 
 
 # =============================================================================
+# LINK EXISTING PATIENT (By Email)
+# =============================================================================
+
+
+class LinkExistingPatientIn(schemas.BaseModel):
+    """Schema for linking an existing patient by email."""
+    patient_email: str
+    initial_focus: Optional[str] = None
+
+
+@r.post("/link-existing", response_model=schemas.PatientSummaryOut)
+def link_existing_patient(
+    payload: LinkExistingPatientIn,
+    current_therapist: models.Therapists = Depends(get_current_therapist),
+    db: Session = Depends(get_db),
+):
+    """
+    Link an existing patient to this therapist by email.
+    
+    Use this to connect with patients who already have accounts.
+    """
+    email = payload.patient_email.lower().strip()
+    
+    # Find existing user
+    patient = (
+        db.query(models.Users)
+        .filter(models.Users.email == email)
+        .first()
+    )
+    
+    if not patient:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No patient found with this email. Use /invite to invite new patients.",
+        )
+    
+    # Check if already linked
+    existing_link = (
+        db.query(models.TherapistPatients)
+        .filter(
+            models.TherapistPatients.therapist_id == current_therapist.id,
+            models.TherapistPatients.patient_user_id == patient.id,
+        )
+        .first()
+    )
+    
+    if existing_link:
+        if existing_link.status == "active":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This patient is already linked to you",
+            )
+        else:
+            # Reactivate
+            existing_link.status = "active"
+            existing_link.initial_focus = payload.initial_focus
+            db.commit()
+            db.refresh(existing_link)
+            return _build_patient_summary(db, patient, existing_link)
+    
+    # Create new link
+    new_link = models.TherapistPatients(
+        therapist_id=current_therapist.id,
+        patient_user_id=patient.id,
+        initial_focus=payload.initial_focus,
+        status="active",
+        ba_week=1,
+    )
+    db.add(new_link)
+    db.commit()
+    db.refresh(new_link)
+    
+    return _build_patient_summary(db, patient, new_link)
+
+
+# =============================================================================
 # INVITE PATIENT
 # =============================================================================
 
