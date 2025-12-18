@@ -9,20 +9,16 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-import base64
+import json
 from datetime import datetime
 
+import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from passlib.context import CryptContext
 
 from app.db import SessionLocal
 from app import models, schemas
 from app.auth_utils import create_therapist_access_token, get_current_therapist
-
-
-# Password hashing context
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 # Router with prefix for all therapist auth endpoints
@@ -45,37 +41,27 @@ def _generate_therapist_hash(email: str) -> str:
 
 def _hash_password(password: str) -> str:
     """
-    Hash a password using bcrypt with SHA256 pre-hashing.
+    Hash a password using bcrypt.
     
-    This handles passwords of any length by first hashing with SHA256,
-    then base64 encoding (44 chars), which is well under bcrypt's 72-byte limit.
+    Truncates to 72 bytes to handle bcrypt's limit.
     """
-    # Ensure password is a string and encode to bytes
-    password_bytes = password.encode('utf-8') if isinstance(password, str) else password
-    # Pre-hash with SHA256 to handle passwords of any length
-    sha256_hash = hashlib.sha256(password_bytes).digest()
-    # Base64 encode to get a safe string (44 chars, well under 72 bytes)
-    password_b64 = base64.b64encode(sha256_hash).decode('utf-8')
-    # Extra safety: truncate to 72 bytes (though base64 of SHA256 is always 44 chars)
-    return pwd_context.hash(password_b64[:72])
+    password_bytes = password.encode("utf-8")[:72]
+    salt = bcrypt.gensalt()
+    hashed = bcrypt.hashpw(password_bytes, salt)
+    return hashed.decode("utf-8")
 
 
 def _verify_password(plain_password: str, hashed_password: str) -> bool:
     """
-    Verify a password against its hash using SHA256 pre-hashing.
+    Verify a password against its hash.
     
-    Must use the same pre-hashing method as _hash_password.
+    Truncates to 72 bytes to match hashing.
     """
     try:
-        # Ensure password is a string and encode to bytes
-        password_bytes = plain_password.encode('utf-8') if isinstance(plain_password, str) else plain_password
-        # Pre-hash with SHA256 (same as during hashing)
-        sha256_hash = hashlib.sha256(password_bytes).digest()
-        password_b64 = base64.b64encode(sha256_hash).decode('utf-8')
-        # Extra safety: truncate to 72 bytes
-        return pwd_context.verify(password_b64[:72], hashed_password)
+        password_bytes = plain_password.encode("utf-8")[:72]
+        hashed_bytes = hashed_password.encode("utf-8")
+        return bcrypt.checkpw(password_bytes, hashed_bytes)
     except Exception:
-        # If verification fails for any reason (e.g., malformed hash), return False
         return False
 
 
@@ -354,8 +340,6 @@ def get_settings(
     """
     Get therapist's settings.
     """
-    import json
-    
     # Parse settings from JSON, use defaults if not set
     defaults = {
         "notify_patient_inactivity": True,
@@ -386,8 +370,6 @@ def update_settings(
     
     Only updates fields that are provided (non-None).
     """
-    import json
-    
     # Load existing settings
     existing = {}
     if current_therapist.settings_json:
