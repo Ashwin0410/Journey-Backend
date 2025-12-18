@@ -58,6 +58,7 @@ from app.routes.intake_edit import r as intake_edit_r
 from app.routes.therapist_auth import r as therapist_auth_r
 from app.routes.therapist_patients import r as therapist_patients_r
 from app.routes.therapist_dashboard import r as therapist_dashboard_r
+from app.routes.therapist_notes import r as therapist_notes_r
 
 app.include_router(health_r)
 app.include_router(journey_r)
@@ -76,3 +77,4 @@ app.include_router(intake_edit_r)
 app.include_router(therapist_auth_r)
 app.include_router(therapist_patients_r)
 app.include_router(therapist_dashboard_r)
+app.include_router(therapist_notes_r)
