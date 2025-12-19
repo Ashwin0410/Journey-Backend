@@ -601,6 +601,106 @@ def _fallback_context_from_history(db: Session, user_hash: Optional[str]) -> dic
     return out
 
 
+def _get_therapist_suggested_activities(db: Session, user_hash: str) -> List[models.Activities]:
+    """
+    Get enabled therapist-suggested activities for a patient.
+    
+    Looks up the patient by user_hash, finds their therapist link,
+    then fetches enabled activities from TherapistSuggestedActivities.
+    These are converted to Activities model format for consistency.
+    """
+    if not user_hash:
+        return []
+    
+    try:
+        # Find the user by user_hash
+        user = db.query(models.Users).filter(models.Users.user_hash == user_hash).first()
+        if not user:
+            return []
+        
+        # Find therapist-patient link
+        therapist_link = (
+            db.query(models.TherapistPatients)
+            .filter(
+                models.TherapistPatients.patient_user_id == user.id,
+                models.TherapistPatients.status == "active",
+            )
+            .first()
+        )
+        if not therapist_link:
+            return []
+        
+        # Get enabled therapist-suggested activities for this patient
+        therapist_activities = (
+            db.query(models.TherapistSuggestedActivities)
+            .filter(
+                models.TherapistSuggestedActivities.patient_user_id == user.id,
+                models.TherapistSuggestedActivities.is_enabled == True,
+            )
+            .order_by(models.TherapistSuggestedActivities.created_at.desc())
+            .all()
+        )
+        
+        if not therapist_activities:
+            return []
+        
+        # Convert to Activities format and store in DB so they work with existing flow
+        now = datetime.utcnow()
+        activity_rows: List[models.Activities] = []
+        
+        for ta in therapist_activities:
+            # Check if this therapist activity was already converted to an Activity
+            # by looking for matching title + description created recently
+            existing = (
+                db.query(models.Activities)
+                .filter(
+                    models.Activities.title == ta.title,
+                    models.Activities.description == ta.description,
+                    models.Activities.is_active == True,
+                )
+                .order_by(models.Activities.created_at.desc())
+                .first()
+            )
+            
+            if existing:
+                # Use existing activity
+                activity_rows.append(existing)
+            else:
+                # Create new Activity from therapist suggestion
+                tags = ["+ TherapistSuggested"]
+                if ta.category:
+                    tags.append(ta.category)
+                
+                new_activity = models.Activities(
+                    title=ta.title,
+                    description=ta.description,
+                    life_area=ta.category or "General",
+                    effort_level=ta.barrier_level.lower() if ta.barrier_level else "low",
+                    reward_type="other",
+                    default_duration_min=ta.duration_minutes or 15,
+                    location_label="as suggested by therapist",
+                    tags_json=json.dumps(tags),
+                    is_active=True,
+                    created_at=now,
+                    lat=None,
+                    lng=None,
+                    place_id=None,
+                )
+                db.add(new_activity)
+                activity_rows.append(new_activity)
+        
+        if activity_rows:
+            db.commit()
+            for row in activity_rows:
+                db.refresh(row)
+        
+        return activity_rows
+    
+    except Exception as e:
+        print(f"[activity] Error getting therapist suggested activities: {e}")
+        return []
+
+
 
 
 @r.get(
@@ -700,24 +800,49 @@ def get_recommendation(
 
     rows = _store_generated_activities(db, activities=generated)
 
+    # Get therapist-suggested activities and add them to the list
+    therapist_rows: List[models.Activities] = []
+    if user_hash:
+        therapist_rows = _get_therapist_suggested_activities(db, user_hash)
+        if therapist_rows:
+            print(f"[activity] Adding {len(therapist_rows)} therapist-suggested activities")
+
+    # Combine: LLM activities + therapist activities
+    all_rows = rows + therapist_rows
+
     if life_area:
         filtered = [
             r_
-            for r_ in rows
+            for r_ in all_rows
             if (r_.life_area or "").lower() == life_area.lower()
         ]
-        candidates = filtered or rows
+        candidates = filtered or all_rows
     else:
-        candidates = rows
+        candidates = all_rows
 
     if not candidates:
         raise HTTPException(status_code=404, detail="No activities available")
 
-    selected = sorted(
-        candidates,
+    # Sort by created_at, but keep therapist activities at the end
+    # First: LLM activities sorted by created_at desc
+    # Then: Therapist activities sorted by created_at desc
+    llm_candidates = [c for c in candidates if c not in therapist_rows]
+    therapist_candidates = [c for c in candidates if c in therapist_rows]
+    
+    llm_sorted = sorted(
+        llm_candidates,
         key=lambda x: x.created_at or datetime.utcnow(),
         reverse=True,
     )[:limit]
+    
+    therapist_sorted = sorted(
+        therapist_candidates,
+        key=lambda x: x.created_at or datetime.utcnow(),
+        reverse=True,
+    )
+    
+    # Combine: LLM first (up to limit), then all therapist activities
+    selected = llm_sorted + therapist_sorted
 
 
     if commit_first and user_hash and selected:
