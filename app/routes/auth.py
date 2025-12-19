@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 import json
 from typing import Dict
 from urllib.parse import urlencode
@@ -51,6 +51,74 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+# ============================================================================
+# HELPER: AUTO-LINK PATIENT TO THERAPIST FROM PENDING INVITES
+# ============================================================================
+
+
+def auto_link_patient_from_invites(db: Session, user: models.Users) -> None:
+    """
+    Check if there are any pending invites for this user's email.
+    If found, automatically link the patient to the therapist.
+    """
+    if not user.email:
+        return
+    
+    try:
+        # Find all pending invites for this email
+        pending_invites = (
+            db.query(models.PatientInvites)
+            .filter(
+                models.PatientInvites.patient_email == user.email.lower(),
+                models.PatientInvites.status == "pending",
+            )
+            .all()
+        )
+        
+        for invite in pending_invites:
+            # Check if invite has expired
+            if invite.expires_at and invite.expires_at < datetime.utcnow():
+                invite.status = "expired"
+                continue
+            
+            # Check if link already exists
+            existing_link = (
+                db.query(models.TherapistPatients)
+                .filter(
+                    models.TherapistPatients.therapist_id == invite.therapist_id,
+                    models.TherapistPatients.patient_user_id == user.id,
+                )
+                .first()
+            )
+            
+            if existing_link:
+                # Reactivate if needed
+                if existing_link.status != "active":
+                    existing_link.status = "active"
+                    existing_link.initial_focus = invite.initial_focus
+            else:
+                # Create new link
+                new_link = models.TherapistPatients(
+                    therapist_id=invite.therapist_id,
+                    patient_user_id=user.id,
+                    initial_focus=invite.initial_focus,
+                    status="active",
+                    ba_week=1,
+                )
+                db.add(new_link)
+            
+            # Mark invite as accepted
+            invite.status = "accepted"
+            invite.accepted_user_id = user.id
+            invite.accepted_at = datetime.utcnow()
+        
+        db.commit()
+    except Exception as e:
+        # Log error but don't fail the auth flow
+        print(f"Error auto-linking patient from invites: {e}")
+        db.rollback()
 
 
 # ============================================================================
@@ -145,9 +213,10 @@ def google_callback(
     )
 
     today = date.today()
+    is_new_user = False
 
     if not user:
-
+        is_new_user = True
         user = models.Users(
             user_hash=user_hash,
             email=email,
@@ -173,7 +242,9 @@ def google_callback(
         db.commit()
         db.refresh(user)
 
-    
+    # Auto-link patient to therapist if there are pending invites
+    auto_link_patient_from_invites(db, user)
+
     jwt_token = create_access_token({"sub": user.user_hash})
 
     
@@ -277,6 +348,9 @@ def register(
     db.commit()
     db.refresh(user)
     
+    # Auto-link patient to therapist if there are pending invites
+    auto_link_patient_from_invites(db, user)
+    
     # Return user as dictionary
     return {
         "id": user.id,
@@ -343,6 +417,9 @@ def login(
     
     db.commit()
     db.refresh(user)
+    
+    # Auto-link patient to therapist if there are pending invites
+    auto_link_patient_from_invites(db, user)
     
     # Create JWT token
     jwt_token = create_access_token({"sub": user.user_hash})
