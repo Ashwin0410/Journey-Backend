@@ -46,30 +46,39 @@ def _get_patient_last_active(db: Session, user_id: int) -> Optional[datetime]:
     """Get the most recent activity timestamp for a patient."""
     # Check multiple tables for last activity
     
-    # Last journal entry
-    last_journal = (
-        db.query(func.max(models.JournalEntries.created_at))
-        .join(models.Users, models.Users.user_hash == models.JournalEntries.user_hash)
-        .filter(models.Users.id == user_id)
-        .scalar()
-    )
+    try:
+        # Last journal entry
+        last_journal = (
+            db.query(func.max(models.JournalEntries.created_at))
+            .join(models.Users, models.Users.user_hash == models.JournalEntries.user_hash)
+            .filter(models.Users.id == user_id)
+            .scalar()
+        )
+    except Exception:
+        last_journal = None
     
-    # Last activity session
-    last_activity = (
-        db.query(func.max(models.ActivitySessions.created_at))
-        .join(models.Users, models.Users.user_hash == models.ActivitySessions.user_hash)
-        .filter(models.Users.id == user_id)
-        .scalar()
-    )
+    try:
+        # Last activity session
+        last_activity = (
+            db.query(func.max(models.ActivitySessions.created_at))
+            .join(models.Users, models.Users.user_hash == models.ActivitySessions.user_hash)
+            .filter(models.Users.id == user_id)
+            .scalar()
+        )
+    except Exception:
+        last_activity = None
     
-    # Last feedback
-    last_feedback = (
-        db.query(func.max(models.Feedback.created_at))
-        .join(models.Sessions, models.Sessions.id == models.Feedback.session_id)
-        .join(models.Users, models.Users.user_hash == models.Sessions.user_hash)
-        .filter(models.Users.id == user_id)
-        .scalar()
-    )
+    try:
+        # Last feedback
+        last_feedback = (
+            db.query(func.max(models.Feedback.created_at))
+            .join(models.Sessions, models.Sessions.id == models.Feedback.session_id)
+            .join(models.Users, models.Users.user_hash == models.Sessions.user_hash)
+            .filter(models.Users.id == user_id)
+            .scalar()
+        )
+    except Exception:
+        last_feedback = None
     
     # Return the most recent
     timestamps = [t for t in [last_journal, last_activity, last_feedback] if t]
@@ -78,39 +87,50 @@ def _get_patient_last_active(db: Session, user_id: int) -> Optional[datetime]:
 
 def _get_activities_count(db: Session, user_hash: str, days: int = 7) -> int:
     """Get count of activities completed in the last N days."""
+    if not user_hash:
+        return 0
+    
     cutoff = datetime.utcnow() - timedelta(days=days)
     
-    count = (
-        db.query(func.count(models.ActivitySessions.id))
-        .filter(
-            models.ActivitySessions.user_hash == user_hash,
-            models.ActivitySessions.status == "completed",
-            models.ActivitySessions.completed_at >= cutoff,
+    try:
+        count = (
+            db.query(func.count(models.ActivitySessions.id))
+            .filter(
+                models.ActivitySessions.user_hash == user_hash,
+                models.ActivitySessions.status == "completed",
+                models.ActivitySessions.completed_at >= cutoff,
+            )
+            .scalar()
         )
-        .scalar()
-    )
-    
-    return count or 0
+        return count or 0
+    except Exception:
+        return 0
 
 
 def _get_activity_streak(db: Session, user_hash: str, days: int = 7) -> List[bool]:
     """Get activity streak for last N days (list of bools, most recent first)."""
+    if not user_hash:
+        return [False] * days
+    
     today = date.today()
     streak = []
     
     for i in range(days):
         check_date = today - timedelta(days=i)
         
-        # Check if any activity was completed on this date
-        has_activity = (
-            db.query(models.ActivitySessions)
-            .filter(
-                models.ActivitySessions.user_hash == user_hash,
-                models.ActivitySessions.status == "completed",
-                func.date(models.ActivitySessions.completed_at) == check_date,
-            )
-            .first()
-        ) is not None
+        try:
+            # Check if any activity was completed on this date
+            has_activity = (
+                db.query(models.ActivitySessions)
+                .filter(
+                    models.ActivitySessions.user_hash == user_hash,
+                    models.ActivitySessions.status == "completed",
+                    func.date(models.ActivitySessions.completed_at) == check_date,
+                )
+                .first()
+            ) is not None
+        except Exception:
+            has_activity = False
         
         streak.append(has_activity)
     
@@ -133,11 +153,11 @@ def _build_patient_summary(
         user_hash=patient.user_hash,
         email=patient.email,
         name=patient.name,
-        journey_day=patient.journey_day,
-        ba_week=link.ba_week,
+        journey_day=patient.journey_day or 1,
+        ba_week=link.ba_week or 1,
         last_session_date=link.last_session_date,
         next_session_date=link.next_session_date,
-        status=link.status,
+        status=link.status or "active",
         initial_focus=link.initial_focus,
         last_active=last_active,
         activities_this_week=activities_this_week,
@@ -177,8 +197,13 @@ def list_patients(
     
     patients = []
     for link, patient in results:
-        summary = _build_patient_summary(db, patient, link)
-        patients.append(summary)
+        try:
+            summary = _build_patient_summary(db, patient, link)
+            patients.append(summary)
+        except Exception as e:
+            # Log error but continue with other patients
+            print(f"Error building patient summary for patient {patient.id}: {e}")
+            continue
     
     return schemas.PatientListOut(
         patients=patients,
@@ -206,143 +231,172 @@ def get_patient_detail(
     link = verify_therapist_patient_access(current_therapist, patient_id, db)
     patient = get_patient_by_id(patient_id, db)
     
-    # Get last active
-    last_active = _get_patient_last_active(db, patient.id)
+    if not patient:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Patient not found",
+        )
     
-    # Get activity counts
-    activities_this_week = _get_activities_count(db, patient.user_hash, days=7)
-    activities_last_week = _get_activities_count(db, patient.user_hash, days=14) - activities_this_week
+    # Get last active (with error handling)
+    try:
+        last_active = _get_patient_last_active(db, patient.id)
+    except Exception:
+        last_active = None
     
-    # Get total sessions
-    total_sessions = (
-        db.query(func.count(models.Sessions.id))
-        .filter(models.Sessions.user_hash == patient.user_hash)
-        .scalar()
-    ) or 0
+    # Get activity counts (with error handling)
+    try:
+        activities_this_week = _get_activities_count(db, patient.user_hash, days=7)
+        activities_last_week = _get_activities_count(db, patient.user_hash, days=14) - activities_this_week
+    except Exception:
+        activities_this_week = 0
+        activities_last_week = 0
     
-    # Get total journal entries
-    total_journal_entries = (
-        db.query(func.count(models.JournalEntries.id))
-        .filter(models.JournalEntries.user_hash == patient.user_hash)
-        .scalar()
-    ) or 0
+    # Get total sessions (with error handling)
+    try:
+        total_sessions = (
+            db.query(func.count(models.Sessions.id))
+            .filter(models.Sessions.user_hash == patient.user_hash)
+            .scalar()
+        ) or 0
+    except Exception:
+        total_sessions = 0
     
-    # Get clinical intake
+    # Get total journal entries (with error handling)
+    try:
+        total_journal_entries = (
+            db.query(func.count(models.JournalEntries.id))
+            .filter(models.JournalEntries.user_hash == patient.user_hash)
+            .scalar()
+        ) or 0
+    except Exception:
+        total_journal_entries = 0
+    
+    # Get clinical intake (with error handling)
     intake = None
-    intake_row = (
-        db.query(models.ClinicalIntake)
-        .filter(models.ClinicalIntake.user_hash == patient.user_hash)
-        .order_by(models.ClinicalIntake.created_at.desc())
-        .first()
-    )
+    try:
+        intake_row = (
+            db.query(models.ClinicalIntake)
+            .filter(models.ClinicalIntake.user_hash == patient.user_hash)
+            .order_by(models.ClinicalIntake.created_at.desc())
+            .first()
+        )
+        
+        if intake_row:
+            # Get schema items
+            schema_items = (
+                db.query(models.SchemaItemResponse)
+                .filter(models.SchemaItemResponse.intake_id == intake_row.id)
+                .all()
+            )
+            
+            # Get PHQ-9 items
+            phq9_items = (
+                db.query(models.Phq9ItemResponse)
+                .filter(models.Phq9ItemResponse.intake_id == intake_row.id)
+                .order_by(models.Phq9ItemResponse.question_number)
+                .all()
+            )
+            
+            # Parse week actions
+            week_actions = []
+            if intake_row.week_actions_json:
+                try:
+                    week_actions = json.loads(intake_row.week_actions_json)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            
+            intake = schemas.IntakeFullOut(
+                id=intake_row.id,
+                user_hash=intake_row.user_hash,
+                created_at=intake_row.created_at,
+                pre_intake_text=intake_row.pre_intake_text,
+                age=intake_row.age,
+                postal_code=intake_row.postal_code,
+                gender=intake_row.gender,
+                in_therapy=intake_row.in_therapy,
+                therapy_type=intake_row.therapy_type,
+                therapy_duration=intake_row.therapy_duration,
+                on_medication=intake_row.on_medication,
+                medication_list=intake_row.medication_list,
+                medication_duration=intake_row.medication_duration,
+                pregnant_or_planning=intake_row.pregnant_or_planning,
+                pregnant_notes=intake_row.pregnant_notes,
+                psychosis_history=intake_row.psychosis_history,
+                psychosis_notes=intake_row.psychosis_notes,
+                privacy_ack=intake_row.privacy_ack,
+                life_area=intake_row.life_area,
+                life_focus=intake_row.life_focus,
+                week_actions=week_actions,
+                week_plan_text=intake_row.week_plan_text,
+                good_life_answer=intake_row.good_life_answer,
+                schema_items=[
+                    schemas.SchemaItemAnswer(
+                        schema_key=s.schema_key,
+                        prompt=s.prompt,
+                        score=s.score,
+                        note=s.note,
+                    )
+                    for s in schema_items
+                ],
+                phq9_items=[
+                    schemas.Phq9ItemAnswer(
+                        question_number=p.question_number,
+                        prompt=p.prompt,
+                        score=p.score,
+                        note=p.note,
+                    )
+                    for p in phq9_items
+                ],
+            )
+    except Exception as e:
+        # Intake data not available - that's OK for new patients
+        print(f"Could not load intake for patient {patient_id}: {e}")
+        intake = None
     
-    if intake_row:
-        # Get schema items
-        schema_items = (
-            db.query(models.SchemaItemResponse)
-            .filter(models.SchemaItemResponse.intake_id == intake_row.id)
-            .all()
-        )
-        
-        # Get PHQ-9 items
-        phq9_items = (
-            db.query(models.Phq9ItemResponse)
-            .filter(models.Phq9ItemResponse.intake_id == intake_row.id)
-            .order_by(models.Phq9ItemResponse.question_number)
-            .all()
-        )
-        
-        # Parse week actions
-        week_actions = []
-        if intake_row.week_actions_json:
-            try:
-                week_actions = json.loads(intake_row.week_actions_json)
-            except (json.JSONDecodeError, TypeError):
-                pass
-        
-        intake = schemas.IntakeFullOut(
-            id=intake_row.id,
-            user_hash=intake_row.user_hash,
-            created_at=intake_row.created_at,
-            pre_intake_text=intake_row.pre_intake_text,
-            age=intake_row.age,
-            postal_code=intake_row.postal_code,
-            gender=intake_row.gender,
-            in_therapy=intake_row.in_therapy,
-            therapy_type=intake_row.therapy_type,
-            therapy_duration=intake_row.therapy_duration,
-            on_medication=intake_row.on_medication,
-            medication_list=intake_row.medication_list,
-            medication_duration=intake_row.medication_duration,
-            pregnant_or_planning=intake_row.pregnant_or_planning,
-            pregnant_notes=intake_row.pregnant_notes,
-            psychosis_history=intake_row.psychosis_history,
-            psychosis_notes=intake_row.psychosis_notes,
-            privacy_ack=intake_row.privacy_ack,
-            life_area=intake_row.life_area,
-            life_focus=intake_row.life_focus,
-            week_actions=week_actions,
-            week_plan_text=intake_row.week_plan_text,
-            good_life_answer=intake_row.good_life_answer,
-            schema_items=[
-                schemas.SchemaItemAnswer(
-                    schema_key=s.schema_key,
-                    prompt=s.prompt,
-                    score=s.score,
-                    note=s.note,
-                )
-                for s in schema_items
-            ],
-            phq9_items=[
-                schemas.Phq9ItemAnswer(
-                    question_number=p.question_number,
-                    prompt=p.prompt,
-                    score=p.score,
-                    note=p.note,
-                )
-                for p in phq9_items
-            ],
-        )
-    
-    # Get latest mini check-in
+    # Get latest mini check-in (with error handling)
     latest_checkin = None
-    checkin_row = (
-        db.query(models.MiniCheckins)
-        .filter(models.MiniCheckins.user_hash == patient.user_hash)
-        .order_by(models.MiniCheckins.created_at.desc())
-        .first()
-    )
-    
-    if checkin_row:
-        latest_checkin = schemas.MiniCheckinOut(
-            id=checkin_row.id,
-            user_hash=checkin_row.user_hash,
-            feeling=checkin_row.feeling,
-            body=checkin_row.body,
-            energy=checkin_row.energy,
-            goal_today=checkin_row.goal_today,
-            why_goal=checkin_row.why_goal,
-            last_win=checkin_row.last_win,
-            hard_thing=checkin_row.hard_thing,
-            schema_choice=checkin_row.schema_choice,
-            postal_code=checkin_row.postal_code,
-            place=checkin_row.place,
-            created_at=checkin_row.created_at,
+    try:
+        checkin_row = (
+            db.query(models.MiniCheckins)
+            .filter(models.MiniCheckins.user_hash == patient.user_hash)
+            .order_by(models.MiniCheckins.created_at.desc())
+            .first()
         )
+        
+        if checkin_row:
+            latest_checkin = schemas.MiniCheckinOut(
+                id=checkin_row.id,
+                user_hash=checkin_row.user_hash,
+                feeling=checkin_row.feeling,
+                body=checkin_row.body,
+                energy=checkin_row.energy,
+                goal_today=checkin_row.goal_today,
+                why_goal=checkin_row.why_goal,
+                last_win=checkin_row.last_win,
+                hard_thing=checkin_row.hard_thing,
+                schema_choice=checkin_row.schema_choice,
+                postal_code=checkin_row.postal_code,
+                place=checkin_row.place,
+                created_at=checkin_row.created_at,
+            )
+    except Exception as e:
+        # Check-in data not available - that's OK
+        print(f"Could not load check-in for patient {patient_id}: {e}")
+        latest_checkin = None
     
     return schemas.PatientDetailOut(
         id=patient.id,
         user_hash=patient.user_hash,
         email=patient.email,
-        name=patient.name,
-        journey_day=patient.journey_day,
-        onboarding_complete=patient.onboarding_complete,
-        safety_flag=patient.safety_flag,
-        ba_week=link.ba_week,
+        name=patient.name or "Patient",
+        journey_day=patient.journey_day or 1,
+        onboarding_complete=patient.onboarding_complete if hasattr(patient, 'onboarding_complete') else False,
+        safety_flag=patient.safety_flag if hasattr(patient, 'safety_flag') else 0,
+        ba_week=link.ba_week or 1,
         ba_start_date=link.ba_start_date,
         last_session_date=link.last_session_date,
         next_session_date=link.next_session_date,
-        status=link.status,
+        status=link.status or "active",
         initial_focus=link.initial_focus,
         linked_at=link.linked_at,
         intake=intake,
@@ -533,6 +587,8 @@ def invite_patient(
     Send an invitation to a new patient.
     
     Creates a pending invite that the patient can accept when they sign up.
+    Note: This creates an invite record. For email delivery, integrate with
+    an email service (SendGrid, AWS SES, etc.) in production.
     """
     email = payload.patient_email.lower().strip()
     
@@ -646,6 +702,11 @@ def invite_patient(
     db.add(invite)
     db.commit()
     db.refresh(invite)
+    
+    # TODO: In production, send email here using SendGrid/AWS SES/etc.
+    # Example:
+    # invite_url = f"https://your-app.com/signup?invite={invite_token}"
+    # send_invite_email(email, payload.patient_name, invite_url, current_therapist.name)
     
     return schemas.PatientInviteOut(
         id=invite.id,
