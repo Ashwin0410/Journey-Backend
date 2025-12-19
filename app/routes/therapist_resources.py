@@ -514,6 +514,14 @@ def _build_resource_item(resource: dict) -> ResourceItemExtendedOut:
     )
 
 
+def _find_resource_by_id(resource_id: str) -> Optional[dict]:
+    """Find a resource by its ID."""
+    for resource in ALL_RESOURCES:
+        if resource["id"] == resource_id:
+            return resource
+    return None
+
+
 # =============================================================================
 # GET ALL RESOURCES
 # =============================================================================
@@ -531,29 +539,36 @@ def get_all_resources(
     - mi: Motivational Interviewing
     - rewire: Using ReWire platform
     """
-    ba_items = [_build_resource_item(res) for res in BA_RESOURCES]
-    mi_items = [_build_resource_item(res) for res in MI_RESOURCES]
-    rewire_items = [_build_resource_item(res) for res in REWIRE_RESOURCES]
-    
-    return ResourceListExtendedOut(
-        sections=[
-            ResourceSectionExtendedOut(
-                section_id="ba",
-                section_title="Behavioral Activation",
-                items=ba_items,
-            ),
-            ResourceSectionExtendedOut(
-                section_id="mi",
-                section_title="Motivational Interviewing",
-                items=mi_items,
-            ),
-            ResourceSectionExtendedOut(
-                section_id="rewire",
-                section_title="Using ReWire",
-                items=rewire_items,
-            ),
-        ]
-    )
+    try:
+        ba_items = [_build_resource_item(res) for res in BA_RESOURCES]
+        mi_items = [_build_resource_item(res) for res in MI_RESOURCES]
+        rewire_items = [_build_resource_item(res) for res in REWIRE_RESOURCES]
+        
+        return ResourceListExtendedOut(
+            sections=[
+                ResourceSectionExtendedOut(
+                    section_id="ba",
+                    section_title="Behavioral Activation",
+                    items=ba_items,
+                ),
+                ResourceSectionExtendedOut(
+                    section_id="mi",
+                    section_title="Motivational Interviewing",
+                    items=mi_items,
+                ),
+                ResourceSectionExtendedOut(
+                    section_id="rewire",
+                    section_title="Using ReWire",
+                    items=rewire_items,
+                ),
+            ]
+        )
+    except Exception as e:
+        print(f"Error getting all resources: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error loading resources: {str(e)}",
+        )
 
 
 # =============================================================================
@@ -586,14 +601,21 @@ def get_resources_by_section(
             detail=f"Section not found. Valid sections: {', '.join(section_map.keys())}",
         )
     
-    title, resources = section_map[section_id]
-    items = [_build_resource_item(res) for res in resources]
-    
-    return ResourceSectionExtendedOut(
-        section_id=section_id,
-        section_title=title,
-        items=items,
-    )
+    try:
+        title, resources = section_map[section_id]
+        items = [_build_resource_item(res) for res in resources]
+        
+        return ResourceSectionExtendedOut(
+            section_id=section_id,
+            section_title=title,
+            items=items,
+        )
+    except Exception as e:
+        print(f"Error getting section {section_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error loading section: {str(e)}",
+        )
 
 
 # =============================================================================
@@ -609,30 +631,40 @@ def get_resource(
     """
     Get a single resource with full content.
     """
-    # Find resource
-    for resource in ALL_RESOURCES:
-        if resource["id"] == resource_id:
-            download_url = None
-            if resource.get("has_file") and resource.get("file_name"):
-                download_url = f"/api/therapist/resources/download/{resource['id']}"
-            
-            return ResourceFullOut(
-                id=resource["id"],
-                title=resource["title"],
-                description=resource["description"],
-                read_time=resource["read_time"],
-                category=resource["category"],
-                section=resource["section"],
-                content=resource["content"].strip(),
-                has_file=resource.get("has_file", False),
-                file_type=resource.get("file_type"),
-                download_url=download_url,
+    try:
+        # Find resource
+        resource = _find_resource_by_id(resource_id)
+        
+        if not resource:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Resource not found: {resource_id}",
             )
-    
-    raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail="Resource not found",
-    )
+        
+        download_url = None
+        if resource.get("has_file") and resource.get("file_name"):
+            download_url = f"/api/therapist/resources/download/{resource['id']}"
+        
+        return ResourceFullOut(
+            id=resource["id"],
+            title=resource["title"],
+            description=resource["description"],
+            read_time=resource["read_time"],
+            category=resource["category"],
+            section=resource["section"],
+            content=resource.get("content", "").strip(),
+            has_file=resource.get("has_file", False),
+            file_type=resource.get("file_type"),
+            download_url=download_url,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting resource {resource_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error loading resource: {str(e)}",
+        )
 
 
 # =============================================================================
@@ -651,11 +683,7 @@ def download_resource(
     Only available for resources that have attached files.
     """
     # Find resource
-    resource = None
-    for res in ALL_RESOURCES:
-        if res["id"] == resource_id:
-            resource = res
-            break
+    resource = _find_resource_by_id(resource_id)
     
     if not resource:
         raise HTTPException(
@@ -708,18 +736,25 @@ def search_resources(
     """
     Search resources by title, description, or content.
     """
-    query = q.lower().strip()
-    
-    results = []
-    for resource in ALL_RESOURCES:
-        # Search in title, description, and content
-        if (query in resource["title"].lower() or
-            query in resource["description"].lower() or
-            query in resource["content"].lower()):
-            results.append(_build_resource_item(resource))
-    
-    return ResourceSearchOut(
-        query=q,
-        results=results,
-        total=len(results),
-    )
+    try:
+        query = q.lower().strip()
+        
+        results = []
+        for resource in ALL_RESOURCES:
+            # Search in title, description, and content
+            if (query in resource["title"].lower() or
+                query in resource["description"].lower() or
+                query in resource.get("content", "").lower()):
+                results.append(_build_resource_item(resource))
+        
+        return ResourceSearchOut(
+            query=q,
+            results=results,
+            total=len(results),
+        )
+    except Exception as e:
+        print(f"Error searching resources: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error searching resources: {str(e)}",
+        )
