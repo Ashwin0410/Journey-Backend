@@ -192,6 +192,28 @@ def _build_chills_context(j: dict) -> str:
     return "\n    Personalization from last session:\n    " + "\n    ".join(lines) + "\n"
 
 
+def _build_therapist_guidance(j: dict) -> str:
+    """
+    Build a prompt section that incorporates therapist's AI guidance
+    for this specific patient.
+    """
+    guidance = j.get("therapist_guidance")
+    
+    if not guidance or not guidance.strip():
+        return ""
+    
+    # Truncate if excessively long (shouldn't normally happen)
+    if len(guidance) > 500:
+        guidance = guidance[:500] + "..."
+    
+    return f"""
+    Therapist guidance for this patient:
+    The patient's therapist has provided the following guidance for how to approach this story.
+    Incorporate these therapeutic insights naturally into the narrative without being heavy-handed:
+    "{guidance}"
+    """
+
+
 def build(j: dict, target_words: int | None = None) -> str:
 
     d = j.get("journey_day")
@@ -253,6 +275,9 @@ def build(j: dict, target_words: int | None = None) -> str:
 
     # Build chills-based personalization section
     chills_context = _build_chills_context(j)
+    
+    # Build therapist guidance section
+    therapist_guidance = _build_therapist_guidance(j)
 
     return dedent(f"""
     Write a single continuous spoken script for Journey Day {d or 0}.
@@ -278,7 +303,7 @@ def build(j: dict, target_words: int | None = None) -> str:
     - Today they try a small concrete action: "{goal}" because "{why}".
     - They have had a recent small win: "{win}".
     - The hard thing in the background is: "{hard}".
-    {chills_context}
+    {chills_context}{therapist_guidance}
     Voice & perspective:
     - Use third person almost all the time (for example: "They wake up with a familiar heaviness...").
     - Do NOT give the character a specific name; refer to them only as "they" / "them".
