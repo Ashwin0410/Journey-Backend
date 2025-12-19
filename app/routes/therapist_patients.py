@@ -989,7 +989,7 @@ def get_patient_activities(
 
 
 # =============================================================================
-# SUGGESTED ACTIVITIES - Get app activities + therapist-created activities
+# SUGGESTED ACTIVITIES - Get current patient activities + therapist-created activities
 # =============================================================================
 
 
@@ -1021,12 +1021,21 @@ def get_suggested_activities(
     Get suggested activities for a patient.
     
     Returns:
-    1. Activities from the app's Activities table (general activities)
+    1. Current activities the patient sees in their app (from ActivitySessions with status 'suggested' or 'started')
     2. Custom activities created by the therapist for this patient
     """
     # Verify access
     verify_therapist_patient_access(current_therapist, patient_id, db)
     
+    # Get patient
+    patient = get_patient_by_id(patient_id, db)
+    if not patient:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Patient not found",
+        )
+    
+    user_hash = patient.user_hash
     activities = []
     
     try:
@@ -1053,34 +1062,42 @@ def get_suggested_activities(
                 source="therapist",
             ))
         
-        # 2. Get app activities (from Activities table)
-        app_activities = (
-            db.query(models.Activities)
-            .filter(models.Activities.is_active == 1)
-            .order_by(models.Activities.life_area, models.Activities.title)
-            .limit(20)  # Limit to avoid too many
-            .all()
-        )
-        
-        for act in app_activities:
-            # Map effort_level to barrier_level
-            barrier_map = {
-                'low': 'Low',
-                'medium': 'Medium', 
-                'high': 'High',
-            }
-            barrier_level = barrier_map.get((act.effort_level or '').lower(), 'Medium')
+        # 2. Get current activities from patient's app (ActivitySessions with status 'suggested' or 'started')
+        if user_hash:
+            current_activity_sessions = (
+                db.query(models.ActivitySessions, models.Activities)
+                .outerjoin(
+                    models.Activities,
+                    models.ActivitySessions.activity_id == models.Activities.id
+                )
+                .filter(
+                    models.ActivitySessions.user_hash == user_hash,
+                    models.ActivitySessions.status.in_(["suggested", "started"]),
+                )
+                .order_by(models.ActivitySessions.created_at.desc())
+                .all()
+            )
             
-            activities.append(SuggestedActivityOut(
-                id=act.id + 100000,  # Offset ID to avoid conflicts with therapist activities
-                title=act.title,
-                description=act.description,
-                category=act.life_area or 'General',
-                barrier_level=barrier_level,
-                duration_minutes=act.default_duration_min,
-                is_enabled=True,
-                source="app",
-            ))
+            for session, activity in current_activity_sessions:
+                if activity:
+                    # Map effort_level to barrier_level
+                    barrier_map = {
+                        'low': 'Low barrier',
+                        'medium': 'Medium barrier',
+                        'high': 'High barrier',
+                    }
+                    barrier_level = barrier_map.get((activity.effort_level or '').lower(), 'Low barrier')
+                    
+                    activities.append(SuggestedActivityOut(
+                        id=activity.id,
+                        title=activity.title,
+                        description=activity.description,
+                        category=activity.life_area or 'General',
+                        barrier_level=barrier_level,
+                        duration_minutes=activity.default_duration_min,
+                        is_enabled=True,
+                        source="app",
+                    ))
         
         return SuggestedActivitiesListOut(
             activities=activities,
