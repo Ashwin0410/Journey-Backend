@@ -8,7 +8,7 @@ from pydub import AudioSegment
 
 from ..schemas import IntakeIn, GenerateOut
 from ..db import SessionLocal
-from ..models import Sessions, Scripts, Activities, ActivitySessions, Users, MiniCheckins  # ← added MiniCheckins
+from ..models import Sessions, Scripts, Activities, ActivitySessions, Users, MiniCheckins, TherapistPatients, TherapistAIGuidance
 from ..services import prompt as pr
 from ..services import llm
 from ..services import selector as sel
@@ -189,6 +189,41 @@ def _fallback_from_history(q: Session, user_hash: str | None) -> dict:
     return out
 
 
+def _get_therapist_guidance(q: Session, user_hash: str | None) -> str | None:
+    """
+    Fetch active therapist AI guidance for a patient by user_hash.
+    
+    Returns the guidance text if found and active, None otherwise.
+    """
+    if not user_hash:
+        return None
+    
+    try:
+        # Find the user
+        user = q.query(Users).filter(Users.user_hash == user_hash).first()
+        if not user:
+            return None
+        
+        # Find active guidance for this patient
+        guidance = (
+            q.query(TherapistAIGuidance)
+            .filter(
+                TherapistAIGuidance.patient_user_id == user.id,
+                TherapistAIGuidance.is_active == True,
+            )
+            .order_by(TherapistAIGuidance.updated_at.desc())
+            .first()
+        )
+        
+        if guidance and guidance.guidance_text:
+            return guidance.guidance_text.strip()
+        
+        return None
+    except Exception as e:
+        print(f"[journey] Error fetching therapist guidance: {e}")
+        return None
+
+
 
 
 @r.post("/api/journey/generate", response_model=GenerateOut)
@@ -326,6 +361,10 @@ def generate(x: IntakeIn, q: Session = Depends(db)):
     jdict["emotion_word"] = effective.get("emotion_word")
     jdict["chills_detail"] = effective.get("chills_detail")
     jdict["had_chills"] = effective.get("had_chills", False)
+    
+    # Fetch and add therapist guidance
+    therapist_guidance = _get_therapist_guidance(q, x.user_hash)
+    jdict["therapist_guidance"] = therapist_guidance
 
     
     arc_name = pr.choose_arc(jdict)
