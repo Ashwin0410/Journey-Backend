@@ -867,11 +867,13 @@ def get_recommendation(
     include_in_schema=False,
 )
 def get_library(
+    user_hash: Optional[str] = Query(None, description="User hash to include therapist-suggested activities"),
     db: Session = Depends(get_db),
 ):
     """
-    Return the latest 6 active activities.
+    Return the latest 6 active activities plus any therapist-suggested activities for the user.
     """
+    # Get latest 6 app activities
     acts = (
         db.query(models.Activities)
         .filter(models.Activities.is_active == True)
@@ -881,6 +883,37 @@ def get_library(
     )
 
     out: List[schemas.ActivityOut] = []
+    
+    # First, add therapist-suggested activities if user_hash is provided
+    if user_hash:
+        therapist_activities = _get_therapist_suggested_activities(db, user_hash)
+        for a in therapist_activities:
+            tags: List[str] = []
+            if a.tags_json:
+                try:
+                    tags = json.loads(a.tags_json)
+                except Exception:
+                    tags = []
+            out.append(
+                schemas.ActivityOut(
+                    id=a.id,
+                    title=a.title,
+                    description=a.description,
+                    life_area=a.life_area,
+                    effort_level=a.effort_level,
+                    reward_type=a.reward_type,
+                    default_duration_min=a.default_duration_min,
+                    location_label=a.location_label,
+                    tags=tags,
+                    lat=a.lat,
+                    lng=a.lng,
+                    place_id=a.place_id,
+                )
+            )
+        if therapist_activities:
+            print(f"[activity] Library: Added {len(therapist_activities)} therapist activities for user {user_hash}")
+
+    # Then add app activities
     for a in acts:
         tags: List[str] = []
         if a.tags_json:
