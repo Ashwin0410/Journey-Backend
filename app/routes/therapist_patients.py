@@ -884,3 +884,116 @@ def accept_invite(
     db.commit()
     
     return {"ok": True, "message": "Invite accepted successfully"}
+
+
+# =============================================================================
+# GET PATIENT ACTIVITIES (NEW)
+# =============================================================================
+
+
+class PatientActivityOut(schemas.BaseModel):
+    """Schema for a patient activity."""
+    id: int
+    activity_name: Optional[str] = None
+    title: Optional[str] = None
+    category: Optional[str] = None
+    status: Optional[str] = None
+    completed_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+    pre_mood: Optional[int] = None
+    post_mood: Optional[int] = None
+    reflection: Optional[str] = None
+
+
+class PatientActivitiesListOut(schemas.BaseModel):
+    """Schema for list of patient activities."""
+    activities: List[PatientActivityOut]
+    total: int
+
+
+@r.get("/{patient_id}/activities", response_model=PatientActivitiesListOut)
+def get_patient_activities(
+    patient_id: int,
+    limit: int = Query(50, ge=1, le=100, description="Max activities to return"),
+    current_therapist: models.Therapists = Depends(get_current_therapist),
+    db: Session = Depends(get_db),
+):
+    """
+    Get recent activities for a patient.
+    
+    Returns completed activities from the patient's activity sessions,
+    including mood data and reflections.
+    """
+    # Verify access
+    verify_therapist_patient_access(current_therapist, patient_id, db)
+    
+    # Get patient
+    patient = get_patient_by_id(patient_id, db)
+    if not patient:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Patient not found",
+        )
+    
+    user_hash = patient.user_hash
+    if not user_hash:
+        return PatientActivitiesListOut(activities=[], total=0)
+    
+    try:
+        # Get activity sessions
+        activity_sessions = (
+            db.query(models.ActivitySessions)
+            .filter(
+                models.ActivitySessions.user_hash == user_hash,
+                models.ActivitySessions.status == "completed",
+            )
+            .order_by(models.ActivitySessions.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+        
+        activities = []
+        for session in activity_sessions:
+            # Try to get activity details if available
+            activity_name = None
+            category = None
+            
+            if hasattr(session, 'activity_id') and session.activity_id:
+                try:
+                    activity = (
+                        db.query(models.Activities)
+                        .filter(models.Activities.id == session.activity_id)
+                        .first()
+                    )
+                    if activity:
+                        activity_name = activity.name
+                        category = activity.category
+                except Exception:
+                    pass
+            
+            # Use session's own data if activity lookup failed
+            if not activity_name:
+                activity_name = getattr(session, 'activity_name', None) or getattr(session, 'title', None) or 'Activity'
+            if not category:
+                category = getattr(session, 'category', None) or 'General'
+            
+            activities.append(PatientActivityOut(
+                id=session.id,
+                activity_name=activity_name,
+                title=activity_name,
+                category=category,
+                status=session.status,
+                completed_at=getattr(session, 'completed_at', None) or session.created_at,
+                created_at=session.created_at,
+                pre_mood=getattr(session, 'pre_mood', None),
+                post_mood=getattr(session, 'post_mood', None),
+                reflection=getattr(session, 'reflection', None) or getattr(session, 'notes', None),
+            ))
+        
+        return PatientActivitiesListOut(
+            activities=activities,
+            total=len(activities),
+        )
+    except Exception as e:
+        print(f"Error getting patient activities: {e}")
+        return PatientActivitiesListOut(activities=[], total=0)
