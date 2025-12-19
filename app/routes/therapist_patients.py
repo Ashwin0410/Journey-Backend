@@ -887,7 +887,7 @@ def accept_invite(
 
 
 # =============================================================================
-# GET PATIENT ACTIVITIES (NEW)
+# GET PATIENT ACTIVITIES (FIXED - joins with Activities table)
 # =============================================================================
 
 
@@ -922,7 +922,7 @@ def get_patient_activities(
     Get recent activities for a patient.
     
     Returns completed activities from the patient's activity sessions,
-    including mood data and reflections.
+    joining with Activities table to get proper activity names.
     """
     # Verify access
     verify_therapist_patient_access(current_therapist, patient_id, db)
@@ -940,9 +940,13 @@ def get_patient_activities(
         return PatientActivitiesListOut(activities=[], total=0)
     
     try:
-        # Get activity sessions
+        # Get activity sessions with LEFT JOIN to Activities table
         activity_sessions = (
-            db.query(models.ActivitySessions)
+            db.query(models.ActivitySessions, models.Activities)
+            .outerjoin(
+                models.Activities,
+                models.ActivitySessions.activity_id == models.Activities.id
+            )
             .filter(
                 models.ActivitySessions.user_hash == user_hash,
                 models.ActivitySessions.status == "completed",
@@ -953,29 +957,14 @@ def get_patient_activities(
         )
         
         activities = []
-        for session in activity_sessions:
-            # Try to get activity details if available
-            activity_name = None
-            category = None
-            
-            if hasattr(session, 'activity_id') and session.activity_id:
-                try:
-                    activity = (
-                        db.query(models.Activities)
-                        .filter(models.Activities.id == session.activity_id)
-                        .first()
-                    )
-                    if activity:
-                        activity_name = activity.name
-                        category = activity.category
-                except Exception:
-                    pass
-            
-            # Use session's own data if activity lookup failed
-            if not activity_name:
-                activity_name = getattr(session, 'activity_name', None) or getattr(session, 'title', None) or 'Activity'
-            if not category:
-                category = getattr(session, 'category', None) or 'General'
+        for session, activity in activity_sessions:
+            # Get activity name and category from joined Activities table
+            if activity:
+                activity_name = activity.title
+                category = activity.life_area or 'General'
+            else:
+                activity_name = 'Activity'
+                category = 'General'
             
             activities.append(PatientActivityOut(
                 id=session.id,
@@ -983,11 +972,11 @@ def get_patient_activities(
                 title=activity_name,
                 category=category,
                 status=session.status,
-                completed_at=getattr(session, 'completed_at', None) or session.created_at,
+                completed_at=session.completed_at or session.created_at,
                 created_at=session.created_at,
-                pre_mood=getattr(session, 'pre_mood', None),
-                post_mood=getattr(session, 'post_mood', None),
-                reflection=getattr(session, 'reflection', None) or getattr(session, 'notes', None),
+                pre_mood=None,  # ActivitySessions doesn't have mood columns
+                post_mood=None,
+                reflection=None,
             ))
         
         return PatientActivitiesListOut(
@@ -997,3 +986,253 @@ def get_patient_activities(
     except Exception as e:
         print(f"Error getting patient activities: {e}")
         return PatientActivitiesListOut(activities=[], total=0)
+
+
+# =============================================================================
+# SUGGESTED ACTIVITIES - Get app activities + therapist-created activities
+# =============================================================================
+
+
+class SuggestedActivityOut(schemas.BaseModel):
+    """Schema for a suggested activity."""
+    id: int
+    title: str
+    description: Optional[str] = None
+    category: Optional[str] = None
+    barrier_level: Optional[str] = None
+    duration_minutes: Optional[int] = None
+    is_enabled: bool = True
+    source: str = "app"  # "app" or "therapist"
+
+
+class SuggestedActivitiesListOut(schemas.BaseModel):
+    """Schema for list of suggested activities."""
+    activities: List[SuggestedActivityOut]
+    total: int
+
+
+@r.get("/{patient_id}/suggested-activities", response_model=SuggestedActivitiesListOut)
+def get_suggested_activities(
+    patient_id: int,
+    current_therapist: models.Therapists = Depends(get_current_therapist),
+    db: Session = Depends(get_db),
+):
+    """
+    Get suggested activities for a patient.
+    
+    Returns:
+    1. Activities from the app's Activities table (general activities)
+    2. Custom activities created by the therapist for this patient
+    """
+    # Verify access
+    verify_therapist_patient_access(current_therapist, patient_id, db)
+    
+    activities = []
+    
+    try:
+        # 1. Get therapist-created activities for this patient
+        therapist_activities = (
+            db.query(models.TherapistSuggestedActivities)
+            .filter(
+                models.TherapistSuggestedActivities.therapist_id == current_therapist.id,
+                models.TherapistSuggestedActivities.patient_user_id == patient_id,
+            )
+            .order_by(models.TherapistSuggestedActivities.created_at.desc())
+            .all()
+        )
+        
+        for act in therapist_activities:
+            activities.append(SuggestedActivityOut(
+                id=act.id,
+                title=act.title,
+                description=act.description,
+                category=act.category,
+                barrier_level=act.barrier_level,
+                duration_minutes=act.duration_minutes,
+                is_enabled=act.is_enabled if act.is_enabled is not None else True,
+                source="therapist",
+            ))
+        
+        # 2. Get app activities (from Activities table)
+        app_activities = (
+            db.query(models.Activities)
+            .filter(models.Activities.is_active == 1)
+            .order_by(models.Activities.life_area, models.Activities.title)
+            .limit(20)  # Limit to avoid too many
+            .all()
+        )
+        
+        for act in app_activities:
+            # Map effort_level to barrier_level
+            barrier_map = {
+                'low': 'Low',
+                'medium': 'Medium', 
+                'high': 'High',
+            }
+            barrier_level = barrier_map.get((act.effort_level or '').lower(), 'Medium')
+            
+            activities.append(SuggestedActivityOut(
+                id=act.id + 100000,  # Offset ID to avoid conflicts with therapist activities
+                title=act.title,
+                description=act.description,
+                category=act.life_area or 'General',
+                barrier_level=barrier_level,
+                duration_minutes=act.default_duration_min,
+                is_enabled=True,
+                source="app",
+            ))
+        
+        return SuggestedActivitiesListOut(
+            activities=activities,
+            total=len(activities),
+        )
+    except Exception as e:
+        print(f"Error getting suggested activities: {e}")
+        return SuggestedActivitiesListOut(activities=[], total=0)
+
+
+# =============================================================================
+# ADD THERAPIST SUGGESTED ACTIVITY
+# =============================================================================
+
+
+class AddSuggestedActivityIn(schemas.BaseModel):
+    """Schema for adding a therapist-suggested activity."""
+    title: str
+    description: Optional[str] = None
+    category: Optional[str] = None
+    barrier_level: Optional[str] = None
+    duration_minutes: Optional[int] = None
+    source_note: Optional[str] = None
+
+
+@r.post("/{patient_id}/suggested-activities", response_model=SuggestedActivityOut)
+def add_suggested_activity(
+    patient_id: int,
+    payload: AddSuggestedActivityIn,
+    current_therapist: models.Therapists = Depends(get_current_therapist),
+    db: Session = Depends(get_db),
+):
+    """
+    Add a custom activity suggestion for a patient.
+    
+    These are therapist-created activities specific to this patient.
+    """
+    # Verify access
+    verify_therapist_patient_access(current_therapist, patient_id, db)
+    
+    # Create new activity
+    new_activity = models.TherapistSuggestedActivities(
+        therapist_id=current_therapist.id,
+        patient_user_id=patient_id,
+        title=payload.title,
+        description=payload.description,
+        category=payload.category,
+        barrier_level=payload.barrier_level,
+        duration_minutes=payload.duration_minutes,
+        source_note=payload.source_note,
+        is_enabled=True,
+    )
+    
+    db.add(new_activity)
+    db.commit()
+    db.refresh(new_activity)
+    
+    return SuggestedActivityOut(
+        id=new_activity.id,
+        title=new_activity.title,
+        description=new_activity.description,
+        category=new_activity.category,
+        barrier_level=new_activity.barrier_level,
+        duration_minutes=new_activity.duration_minutes,
+        is_enabled=new_activity.is_enabled,
+        source="therapist",
+    )
+
+
+# =============================================================================
+# TOGGLE SUGGESTED ACTIVITY
+# =============================================================================
+
+
+@r.post("/{patient_id}/suggested-activities/{activity_id}/toggle")
+def toggle_suggested_activity(
+    patient_id: int,
+    activity_id: int,
+    current_therapist: models.Therapists = Depends(get_current_therapist),
+    db: Session = Depends(get_db),
+):
+    """
+    Toggle the enabled status of a therapist-suggested activity.
+    
+    Note: Only therapist-created activities can be toggled.
+    App activities are always enabled.
+    """
+    # Verify access
+    verify_therapist_patient_access(current_therapist, patient_id, db)
+    
+    # Find the activity
+    activity = (
+        db.query(models.TherapistSuggestedActivities)
+        .filter(
+            models.TherapistSuggestedActivities.id == activity_id,
+            models.TherapistSuggestedActivities.therapist_id == current_therapist.id,
+            models.TherapistSuggestedActivities.patient_user_id == patient_id,
+        )
+        .first()
+    )
+    
+    if not activity:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Activity not found or cannot be toggled",
+        )
+    
+    # Toggle
+    activity.is_enabled = not activity.is_enabled
+    db.commit()
+    
+    return {"ok": True, "is_enabled": activity.is_enabled}
+
+
+# =============================================================================
+# DELETE SUGGESTED ACTIVITY
+# =============================================================================
+
+
+@r.delete("/{patient_id}/suggested-activities/{activity_id}")
+def delete_suggested_activity(
+    patient_id: int,
+    activity_id: int,
+    current_therapist: models.Therapists = Depends(get_current_therapist),
+    db: Session = Depends(get_db),
+):
+    """
+    Delete a therapist-suggested activity.
+    
+    Note: Only therapist-created activities can be deleted.
+    """
+    # Verify access
+    verify_therapist_patient_access(current_therapist, patient_id, db)
+    
+    # Find the activity
+    activity = (
+        db.query(models.TherapistSuggestedActivities)
+        .filter(
+            models.TherapistSuggestedActivities.id == activity_id,
+            models.TherapistSuggestedActivities.therapist_id == current_therapist.id,
+            models.TherapistSuggestedActivities.patient_user_id == patient_id,
+        )
+        .first()
+    )
+    
+    if not activity:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Activity not found",
+        )
+    
+    db.delete(activity)
+    db.commit()
+    
+    return {"ok": True, "message": "Activity deleted"}
