@@ -487,6 +487,35 @@ def _to_activity_out(act: models.Activities) -> schemas.ActivityRecommendationOu
     )
 
 
+def _therapist_activity_to_out(ta: models.TherapistSuggestedActivities) -> schemas.ActivityRecommendationOut:
+    """
+    Convert a TherapistSuggestedActivities record to ActivityRecommendationOut.
+    Uses negative ID to distinguish from regular activities.
+    """
+    tags = ["+ TherapistSuggested"]
+    if ta.category:
+        tags.append(ta.category)
+    
+    # Use negative ID (based on therapist activity ID) to avoid collision with regular activities
+    # This allows the frontend to identify therapist activities
+    virtual_id = -ta.id
+    
+    return schemas.ActivityRecommendationOut(
+        id=virtual_id,
+        title=ta.title,
+        description=ta.description,
+        life_area=ta.category or "General",
+        effort_level=ta.barrier_level.lower() if ta.barrier_level else "low",
+        reward_type="other",
+        default_duration_min=ta.duration_minutes or 15,
+        location_label="as suggested by therapist",
+        tags=tags,
+        lat=None,
+        lng=None,
+        place_id=None,
+    )
+
+
 def _commit_activity(db: Session, *, user_hash: str, activity_id: int) -> None:
     row = models.ActivitySessions(
         user_hash=user_hash,
@@ -601,13 +630,16 @@ def _fallback_context_from_history(db: Session, user_hash: Optional[str]) -> dic
     return out
 
 
-def _get_therapist_suggested_activities(db: Session, user_hash: str) -> List[models.Activities]:
+def _get_therapist_suggested_activities_for_patient(
+    db: Session, user_hash: str
+) -> List[models.TherapistSuggestedActivities]:
     """
-    Get enabled therapist-suggested activities for a patient.
+    Get enabled therapist-suggested activities for a SPECIFIC patient only.
     
-    Looks up the patient by user_hash, finds their therapist link,
-    then fetches enabled activities from TherapistSuggestedActivities.
-    These are converted to Activities model format for consistency.
+    CHANGE #4: Fixed to only return activities assigned to this specific patient,
+    not activities from other patients or global activities.
+    
+    Returns the raw TherapistSuggestedActivities records (not converted to Activities).
     """
     if not user_hash:
         return []
@@ -616,9 +648,10 @@ def _get_therapist_suggested_activities(db: Session, user_hash: str) -> List[mod
         # Find the user by user_hash
         user = db.query(models.Users).filter(models.Users.user_hash == user_hash).first()
         if not user:
+            print(f"[activity] No user found for user_hash: {user_hash}")
             return []
         
-        # Find therapist-patient link
+        # Find active therapist-patient link for this specific patient
         therapist_link = (
             db.query(models.TherapistPatients)
             .filter(
@@ -628,9 +661,11 @@ def _get_therapist_suggested_activities(db: Session, user_hash: str) -> List[mod
             .first()
         )
         if not therapist_link:
+            print(f"[activity] No active therapist link for user_id: {user.id}")
             return []
         
-        # Get enabled therapist-suggested activities for this patient
+        # CHANGE #4: Get enabled therapist-suggested activities for THIS SPECIFIC PATIENT ONLY
+        # Filter by patient_user_id to ensure activities are only for this patient
         therapist_activities = (
             db.query(models.TherapistSuggestedActivities)
             .filter(
@@ -641,60 +676,10 @@ def _get_therapist_suggested_activities(db: Session, user_hash: str) -> List[mod
             .all()
         )
         
-        if not therapist_activities:
-            return []
+        if therapist_activities:
+            print(f"[activity] Found {len(therapist_activities)} therapist activities for patient user_id: {user.id}")
         
-        # Convert to Activities format and store in DB so they work with existing flow
-        now = datetime.utcnow()
-        activity_rows: List[models.Activities] = []
-        
-        for ta in therapist_activities:
-            # Check if this therapist activity was already converted to an Activity
-            # by looking for matching title + description created recently
-            existing = (
-                db.query(models.Activities)
-                .filter(
-                    models.Activities.title == ta.title,
-                    models.Activities.description == ta.description,
-                    models.Activities.is_active == True,
-                )
-                .order_by(models.Activities.created_at.desc())
-                .first()
-            )
-            
-            if existing:
-                # Use existing activity
-                activity_rows.append(existing)
-            else:
-                # Create new Activity from therapist suggestion
-                tags = ["+ TherapistSuggested"]
-                if ta.category:
-                    tags.append(ta.category)
-                
-                new_activity = models.Activities(
-                    title=ta.title,
-                    description=ta.description,
-                    life_area=ta.category or "General",
-                    effort_level=ta.barrier_level.lower() if ta.barrier_level else "low",
-                    reward_type="other",
-                    default_duration_min=ta.duration_minutes or 15,
-                    location_label="as suggested by therapist",
-                    tags_json=json.dumps(tags),
-                    is_active=True,
-                    created_at=now,
-                    lat=None,
-                    lng=None,
-                    place_id=None,
-                )
-                db.add(new_activity)
-                activity_rows.append(new_activity)
-        
-        if activity_rows:
-            db.commit()
-            for row in activity_rows:
-                db.refresh(row)
-        
-        return activity_rows
+        return therapist_activities
     
     except Exception as e:
         print(f"[activity] Error getting therapist suggested activities: {e}")
@@ -724,14 +709,62 @@ def commit_activity(
     payload: schemas.ActivityCommitIn,
     db: Session = Depends(get_db),
 ):
-    act = (
-        db.query(models.Activities)
-        .filter(models.Activities.id == payload.activity_id, models.Activities.is_active == True)
-        .first()
-    )
-    if not act:
-        raise HTTPException(status_code=404, detail="Activity not found")
-    _commit_activity(db, user_hash=payload.user_hash, activity_id=payload.activity_id)
+    activity_id = payload.activity_id
+    
+    # CHANGE #4: Handle negative IDs (therapist activities)
+    # Negative IDs are virtual IDs for therapist-suggested activities
+    if activity_id < 0:
+        # This is a therapist activity - we need to create a real Activity from it
+        therapist_activity_id = -activity_id
+        
+        ta = (
+            db.query(models.TherapistSuggestedActivities)
+            .filter(
+                models.TherapistSuggestedActivities.id == therapist_activity_id,
+                models.TherapistSuggestedActivities.is_enabled == True,
+            )
+            .first()
+        )
+        if not ta:
+            raise HTTPException(status_code=404, detail="Therapist activity not found")
+        
+        # Create a real Activity from the therapist suggestion for this commit
+        tags = ["+ TherapistSuggested"]
+        if ta.category:
+            tags.append(ta.category)
+        
+        now = datetime.utcnow()
+        new_activity = models.Activities(
+            title=ta.title,
+            description=ta.description,
+            life_area=ta.category or "General",
+            effort_level=ta.barrier_level.lower() if ta.barrier_level else "low",
+            reward_type="other",
+            default_duration_min=ta.duration_minutes or 15,
+            location_label="as suggested by therapist",
+            tags_json=json.dumps(tags),
+            is_active=True,
+            created_at=now,
+            lat=None,
+            lng=None,
+            place_id=None,
+        )
+        db.add(new_activity)
+        db.commit()
+        db.refresh(new_activity)
+        
+        activity_id = new_activity.id
+    else:
+        # Regular activity - verify it exists
+        act = (
+            db.query(models.Activities)
+            .filter(models.Activities.id == activity_id, models.Activities.is_active == True)
+            .first()
+        )
+        if not act:
+            raise HTTPException(status_code=404, detail="Activity not found")
+    
+    _commit_activity(db, user_hash=payload.user_hash, activity_id=activity_id)
     return {"ok": True}
 
 
@@ -800,58 +833,52 @@ def get_recommendation(
 
     rows = _store_generated_activities(db, activities=generated)
 
-    # Get therapist-suggested activities and add them to the list
-    therapist_rows: List[models.Activities] = []
+    # CHANGE #4: Get therapist-suggested activities for THIS SPECIFIC PATIENT ONLY
+    # These are returned directly without creating global Activity rows
+    therapist_activity_outs: List[schemas.ActivityRecommendationOut] = []
     if user_hash:
-        therapist_rows = _get_therapist_suggested_activities(db, user_hash)
-        if therapist_rows:
-            print(f"[activity] Adding {len(therapist_rows)} therapist-suggested activities")
+        therapist_activities = _get_therapist_suggested_activities_for_patient(db, user_hash)
+        if therapist_activities:
+            print(f"[activity] Adding {len(therapist_activities)} therapist-suggested activities for patient")
+            therapist_activity_outs = [_therapist_activity_to_out(ta) for ta in therapist_activities]
 
-    # Combine: LLM activities + therapist activities
-    all_rows = rows + therapist_rows
-
+    # Filter LLM activities by life_area if specified
     if life_area:
         filtered = [
             r_
-            for r_ in all_rows
+            for r_ in rows
             if (r_.life_area or "").lower() == life_area.lower()
         ]
-        candidates = filtered or all_rows
+        candidates = filtered or rows
     else:
-        candidates = all_rows
+        candidates = rows
 
-    if not candidates:
+    if not candidates and not therapist_activity_outs:
         raise HTTPException(status_code=404, detail="No activities available")
 
-    # Sort by created_at, but keep therapist activities at the end
-    # First: LLM activities sorted by created_at desc
-    # Then: Therapist activities sorted by created_at desc
-    llm_candidates = [c for c in candidates if c not in therapist_rows]
-    therapist_candidates = [c for c in candidates if c in therapist_rows]
-    
+    # Sort LLM activities by created_at
     llm_sorted = sorted(
-        llm_candidates,
+        candidates,
         key=lambda x: x.created_at or datetime.utcnow(),
         reverse=True,
     )[:limit]
-    
-    therapist_sorted = sorted(
-        therapist_candidates,
-        key=lambda x: x.created_at or datetime.utcnow(),
-        reverse=True,
-    )
-    
-    # Combine: LLM first (up to limit), then all therapist activities
-    selected = llm_sorted + therapist_sorted
 
+    # Convert to output format
+    recs: List[schemas.ActivityRecommendationOut] = [_to_activity_out(a) for a in llm_sorted]
+    
+    # CHANGE #4: Add therapist activities at the end (they're patient-specific)
+    recs.extend(therapist_activity_outs)
 
-    if commit_first and user_hash and selected:
+    if commit_first and user_hash and recs:
         try:
-            _commit_activity(db, user_hash=user_hash, activity_id=selected[0].id)
+            first_activity_id = recs[0].id
+            # Only commit if it's a positive ID (regular activity)
+            # Therapist activities (negative IDs) will be converted when committed
+            if first_activity_id > 0:
+                _commit_activity(db, user_hash=user_hash, activity_id=first_activity_id)
         except Exception as e:
             print(f"[activity] commit_first failed: {e}")
 
-    recs: List[schemas.ActivityRecommendationOut] = [_to_activity_out(a) for a in selected]
     return schemas.ActivityRecommendationListOut(activities=recs)
 
 
@@ -872,6 +899,8 @@ def get_library(
 ):
     """
     Return the latest 6 active activities plus any therapist-suggested activities for the user.
+    
+    CHANGE #4: Therapist activities are now patient-specific and not converted to global Activities.
     """
     # Get latest 6 app activities
     acts = (
@@ -884,30 +913,32 @@ def get_library(
 
     out: List[schemas.ActivityOut] = []
     
-    # First, add therapist-suggested activities if user_hash is provided
+    # CHANGE #4: Add therapist-suggested activities for THIS SPECIFIC PATIENT ONLY
+    # These are returned with virtual (negative) IDs to distinguish them
     if user_hash:
-        therapist_activities = _get_therapist_suggested_activities(db, user_hash)
-        for a in therapist_activities:
-            tags: List[str] = []
-            if a.tags_json:
-                try:
-                    tags = json.loads(a.tags_json)
-                except Exception:
-                    tags = []
+        therapist_activities = _get_therapist_suggested_activities_for_patient(db, user_hash)
+        for ta in therapist_activities:
+            tags = ["+ TherapistSuggested"]
+            if ta.category:
+                tags.append(ta.category)
+            
+            # Use negative ID to distinguish from regular activities
+            virtual_id = -ta.id
+            
             out.append(
                 schemas.ActivityOut(
-                    id=a.id,
-                    title=a.title,
-                    description=a.description,
-                    life_area=a.life_area,
-                    effort_level=a.effort_level,
-                    reward_type=a.reward_type,
-                    default_duration_min=a.default_duration_min,
-                    location_label=a.location_label,
+                    id=virtual_id,
+                    title=ta.title,
+                    description=ta.description,
+                    life_area=ta.category or "General",
+                    effort_level=ta.barrier_level.lower() if ta.barrier_level else "low",
+                    reward_type="other",
+                    default_duration_min=ta.duration_minutes or 15,
+                    location_label="as suggested by therapist",
                     tags=tags,
-                    lat=a.lat,
-                    lng=a.lng,
-                    place_id=a.place_id,
+                    lat=None,
+                    lng=None,
+                    place_id=None,
                 )
             )
         if therapist_activities:
@@ -946,20 +977,66 @@ def start_activity(
     payload: schemas.ActivityStartIn,
     db: Session = Depends(get_db),
 ):
-    act = (
-        db.query(models.Activities)
-        .filter(
-            models.Activities.id == payload.activity_id,
-            models.Activities.is_active == True,
+    activity_id = payload.activity_id
+    
+    # CHANGE #4: Handle negative IDs (therapist activities)
+    if activity_id < 0:
+        # This is a therapist activity - create a real Activity from it first
+        therapist_activity_id = -activity_id
+        
+        ta = (
+            db.query(models.TherapistSuggestedActivities)
+            .filter(
+                models.TherapistSuggestedActivities.id == therapist_activity_id,
+                models.TherapistSuggestedActivities.is_enabled == True,
+            )
+            .first()
         )
-        .first()
-    )
-    if not act:
-        raise HTTPException(status_code=404, detail="Activity not found")
+        if not ta:
+            raise HTTPException(status_code=404, detail="Therapist activity not found")
+        
+        # Create a real Activity from the therapist suggestion
+        tags = ["+ TherapistSuggested"]
+        if ta.category:
+            tags.append(ta.category)
+        
+        now = datetime.utcnow()
+        new_activity = models.Activities(
+            title=ta.title,
+            description=ta.description,
+            life_area=ta.category or "General",
+            effort_level=ta.barrier_level.lower() if ta.barrier_level else "low",
+            reward_type="other",
+            default_duration_min=ta.duration_minutes or 15,
+            location_label="as suggested by therapist",
+            tags_json=json.dumps(tags),
+            is_active=True,
+            created_at=now,
+            lat=None,
+            lng=None,
+            place_id=None,
+        )
+        db.add(new_activity)
+        db.commit()
+        db.refresh(new_activity)
+        
+        activity_id = new_activity.id
+    else:
+        # Regular activity - verify it exists
+        act = (
+            db.query(models.Activities)
+            .filter(
+                models.Activities.id == activity_id,
+                models.Activities.is_active == True,
+            )
+            .first()
+        )
+        if not act:
+            raise HTTPException(status_code=404, detail="Activity not found")
 
     row = models.ActivitySessions(
         user_hash=payload.user_hash,
-        activity_id=act.id,
+        activity_id=activity_id,
         session_id=payload.session_id,
         status="started",
         started_at=datetime.utcnow(),
@@ -976,11 +1053,40 @@ def complete_activity(
     payload: schemas.ActivityStartIn,
     db: Session = Depends(get_db),
 ):
+    activity_id = payload.activity_id
+    
+    # CHANGE #4: Handle negative IDs (therapist activities)
+    # For completion, we need to find the ActivitySession that was already started
+    # The activity_id in the session would have been converted to a real ID when started
+    if activity_id < 0:
+        # Therapist activity - but by now it should have been converted to a real activity when started
+        # Try to find a session with this user that matches a recently created therapist activity
+        therapist_activity_id = -activity_id
+        
+        ta = (
+            db.query(models.TherapistSuggestedActivities)
+            .filter(models.TherapistSuggestedActivities.id == therapist_activity_id)
+            .first()
+        )
+        if ta:
+            # Look for an Activity with matching title/description that was started by this user
+            matching_activity = (
+                db.query(models.Activities)
+                .filter(
+                    models.Activities.title == ta.title,
+                    models.Activities.description == ta.description,
+                    models.Activities.is_active == True,
+                )
+                .order_by(models.Activities.created_at.desc())
+                .first()
+            )
+            if matching_activity:
+                activity_id = matching_activity.id
 
     session_row = (
         db.query(models.ActivitySessions)
         .filter(
-            models.ActivitySessions.activity_id == payload.activity_id,
+            models.ActivitySessions.activity_id == activity_id,
             models.ActivitySessions.user_hash == payload.user_hash,
             models.ActivitySessions.status == "started",
         )
@@ -1004,21 +1110,66 @@ def swap_activity(
     payload: schemas.ActivitySwapIn,
     db: Session = Depends(get_db),
 ):
-
-    act = (
-        db.query(models.Activities)
-        .filter(
-            models.Activities.id == payload.activity_id,
-            models.Activities.is_active == True,
+    activity_id = payload.activity_id
+    
+    # CHANGE #4: Handle negative IDs (therapist activities)
+    if activity_id < 0:
+        # This is a therapist activity - create a real Activity from it first
+        therapist_activity_id = -activity_id
+        
+        ta = (
+            db.query(models.TherapistSuggestedActivities)
+            .filter(
+                models.TherapistSuggestedActivities.id == therapist_activity_id,
+                models.TherapistSuggestedActivities.is_enabled == True,
+            )
+            .first()
         )
-        .first()
-    )
-    if not act:
-        raise HTTPException(status_code=404, detail="Activity not found")
+        if not ta:
+            raise HTTPException(status_code=404, detail="Therapist activity not found")
+        
+        # Create a real Activity from the therapist suggestion
+        tags = ["+ TherapistSuggested"]
+        if ta.category:
+            tags.append(ta.category)
+        
+        now = datetime.utcnow()
+        new_activity = models.Activities(
+            title=ta.title,
+            description=ta.description,
+            life_area=ta.category or "General",
+            effort_level=ta.barrier_level.lower() if ta.barrier_level else "low",
+            reward_type="other",
+            default_duration_min=ta.duration_minutes or 15,
+            location_label="as suggested by therapist",
+            tags_json=json.dumps(tags),
+            is_active=True,
+            created_at=now,
+            lat=None,
+            lng=None,
+            place_id=None,
+        )
+        db.add(new_activity)
+        db.commit()
+        db.refresh(new_activity)
+        
+        act = new_activity
+    else:
+        # Regular activity
+        act = (
+            db.query(models.Activities)
+            .filter(
+                models.Activities.id == activity_id,
+                models.Activities.is_active == True,
+            )
+            .first()
+        )
+        if not act:
+            raise HTTPException(status_code=404, detail="Activity not found")
 
     row = models.ActivitySessions(
         user_hash=payload.user_hash,
-        activity_id=payload.activity_id,
+        activity_id=act.id,
         status="swapped",
         started_at=datetime.utcnow(),
     )
