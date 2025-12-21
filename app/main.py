@@ -53,7 +53,6 @@ from app.routes import auth as auth_routes
 from app.routes import intake as intake_routes  # NEW
 from app.routes.profile import r as profile_r
 from app.routes.intake_edit import r as intake_edit_r
-
 # Therapist Dashboard Routes (New)
 from app.routes.therapist_auth import r as therapist_auth_r
 from app.routes.therapist_patients import r as therapist_patients_r
@@ -62,7 +61,8 @@ from app.routes.therapist_notes import r as therapist_notes_r
 from app.routes.therapist_guidance import r as therapist_guidance_r
 from app.routes.therapist_activities import r as therapist_activities_r
 from app.routes.therapist_resources import r as therapist_resources_r
-
+# Push Notifications (CHANGE #7)
+from app.routes.notifications import r as notifications_r
 app.include_router(health_r)
 app.include_router(journey_r)
 app.include_router(feedback_r)
@@ -75,7 +75,6 @@ app.include_router(auth_routes.r)
 app.include_router(intake_routes.r)
 app.include_router(profile_r)
 app.include_router(intake_edit_r)
-
 # Therapist Dashboard Routers (New)
 app.include_router(therapist_auth_r)
 app.include_router(therapist_patients_r)
@@ -84,3 +83,5 @@ app.include_router(therapist_notes_r)
 app.include_router(therapist_guidance_r)
 app.include_router(therapist_activities_r)
 app.include_router(therapist_resources_r)
+# Push Notifications Router (CHANGE #7)
+app.include_router(notifications_r)
