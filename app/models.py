@@ -310,6 +310,48 @@ class PreGeneratedAudio(Base):
 
 
 # =============================================================================
+# PUSH NOTIFICATIONS (CHANGE #7)
+# =============================================================================
+
+
+class PushSubscription(Base):
+    """
+    Stores Web Push subscription info for sending notifications.
+    
+    CHANGE #7: Used to notify users when their pre-generated audio is ready,
+    activity reminders, and other engagement notifications.
+    """
+    __tablename__ = "push_subscriptions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_hash = Column(String, index=True, nullable=False)
+    
+    # Push subscription endpoint (unique URL for this device)
+    endpoint = Column(Text, nullable=False)
+    
+    # Encryption keys (from browser's PushSubscription object)
+    p256dh_key = Column(String, nullable=False)  # Public key for encryption
+    auth_key = Column(String, nullable=False)    # Auth secret
+    
+    # Device/browser info (for debugging)
+    user_agent = Column(String, nullable=True)
+    device_type = Column(String, nullable=True)  # mobile, desktop, tablet
+    
+    # Subscription status
+    is_active = Column(Boolean, default=True, index=True)
+    
+    # Last successful push (for cleanup of stale subscriptions)
+    last_push_at = Column(DateTime(timezone=True), nullable=True)
+    last_push_status = Column(String, nullable=True)  # success, failed, expired
+    
+    # Failure tracking (for automatic cleanup)
+    consecutive_failures = Column(Integer, default=0)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+# =============================================================================
 # THERAPIST DASHBOARD MODELS (New)
 # =============================================================================
 
