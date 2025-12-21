@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import math
+import os
+import tempfile
 from datetime import datetime
+from pathlib import Path
 from typing import Optional, Dict, Any, List
 
 from sqlalchemy.orm import Session
@@ -414,4 +417,279 @@ def build_today_summary(db: Session, user: models.Users) -> schemas.TodaySummary
         journey_cooldown_minutes_remaining=cooldown_remaining,
         recommended_activity=rec_act,
         postal_code=postal_code,
+    )
+
+
+# =============================================================================
+# CHANGE #1: Pre-generation functions for Day 2+ audio
+# =============================================================================
+
+
+def generate_narrative_script(
+    db: Session,
+    user_hash: str,
+    journey_day: int,
+    mood: Optional[str] = None,
+    schema_hint: Optional[str] = None,
+    chills_context: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """
+    Generate a narrative script for pre-generation.
+    
+    This uses the same logic as journey.py but returns just the script text.
+    Called by feedback.py when triggering background pre-generation.
+    
+    Args:
+        db: Database session
+        user_hash: User identifier
+        journey_day: The journey day this script is FOR
+        mood: User's mood/feeling
+        schema_hint: Schema theme
+        chills_context: Dict with emotion_word, chills_detail, last_insight, etc.
+    
+    Returns:
+        Script text string, or None if generation fails
+    """
+    try:
+        # Import services here to avoid circular imports
+        from ..services import prompt as pr
+        from ..services import llm
+        from ..services import selector as sel
+        from ..core.config import cfg
+        from ..utils.audio import clean_script, load_audio, duration_ms
+        
+        # Load music index and pick a track for this journey day
+        idx = sel.load_index()
+        ti = sel.pick_track_by_day(idx, journey_day)
+        
+        if ti is None:
+            # Fallback to folder-based selection
+            folders = sel.choose_folder(mood or "mixed", schema_hint or "default")
+            ti = sel.pick_track(idx, folders, [])
+        
+        if ti is None:
+            print(f"[narrative] Could not pick track for day {journey_day}")
+            return None
+        
+        track_id, music_path, chosen_folder, music_file = ti
+        
+        # Get music duration to calculate target words
+        MUSIC_INTRO_MS = 6000
+        music_ms = duration_ms(load_audio(music_path))
+        spoken_target_ms = max(int(music_ms - MUSIC_INTRO_MS), int(0.75 * music_ms))
+        target_words = min(_estimate_target_words(spoken_target_ms, wps=1.7), 1200)
+        
+        # Build the prompt context
+        jdict = {
+            "user_hash": user_hash,
+            "journey_day": journey_day,
+            "feeling": mood or "mixed",
+            "schema_choice": schema_hint or "default",
+            "music_ms": music_ms,
+            "spoken_target_ms": spoken_target_ms,
+            "intro_ms": MUSIC_INTRO_MS,
+        }
+        
+        # Add chills-based context if available
+        if chills_context:
+            jdict["last_insight"] = chills_context.get("last_insight")
+            jdict["chills_level"] = chills_context.get("chills_level")
+            jdict["emotion_word"] = chills_context.get("emotion_word")
+            jdict["chills_detail"] = chills_context.get("chills_detail")
+            jdict["had_chills"] = chills_context.get("had_chills", False)
+            jdict["goal_today"] = chills_context.get("goal_today") or "continue the journey"
+            jdict["place"] = chills_context.get("place")
+        
+        # Choose narrative arc
+        arc_name = pr.choose_arc(jdict)
+        jdict["arc_name"] = arc_name
+        
+        # Build prompt and generate script
+        prompt_txt = pr.build(jdict, target_words=target_words)
+        script = clean_script(llm.generate_text(prompt_txt, cfg.OPENAI_API_KEY))
+        
+        if not script:
+            print(f"[narrative] LLM returned empty script for day {journey_day}")
+            return None
+        
+        # Extend if too short
+        if _word_count(script) < int(0.9 * target_words):
+            need = max(30, target_words - _word_count(script))
+            tail = _last_n_words(script, 40)
+            cont_prompt = _build_continue_prompt(jdict, tail, need_more=need)
+            more = clean_script(llm.generate_text(cont_prompt, cfg.OPENAI_API_KEY))
+            if more and more not in script:
+                script = (script + " " + more).strip()
+        
+        # Clean up ending
+        script = _sentence_safe(script)
+        if not script.endswith((".", "!", "?")):
+            script = script.rstrip() + "."
+        
+        print(f"[narrative] Generated script for day {journey_day}, {_word_count(script)} words")
+        return script
+        
+    except Exception as e:
+        print(f"[narrative] Error generating script: {e}")
+        return None
+
+
+def generate_audio_from_script(
+    script_text: str,
+    voice_id: str = "default",
+    track_id: Optional[str] = None,
+    journey_day: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Generate audio from a script for pre-generation.
+    
+    This synthesizes TTS and mixes with music, similar to journey.py.
+    Called by feedback.py during background pre-generation.
+    
+    Args:
+        script_text: The narrative script text
+        voice_id: ElevenLabs voice ID
+        track_id: Optional specific track ID to use
+        journey_day: Journey day (used for track selection if track_id not provided)
+    
+    Returns:
+        Dict with audio_path and duration_ms, or None if generation fails
+    """
+    try:
+        # Import services here to avoid circular imports
+        from ..services import tts
+        from ..services import mix as mixr
+        from ..services import selector as sel
+        from ..services import store as st
+        from ..core.config import cfg
+        from ..utils.audio import load_audio, duration_ms
+        from ..utils.text import finalize_script
+        from ..utils.hash import sid
+        from pydub import AudioSegment
+        
+        MUSIC_INTRO_MS = 6000
+        
+        # Ensure output directory exists
+        st.ensure_dir(cfg.OUT_DIR)
+        
+        # Select music track
+        idx = sel.load_index()
+        ti = None
+        
+        if journey_day:
+            ti = sel.pick_track_by_day(idx, journey_day)
+        
+        if ti is None:
+            folders = sel.choose_folder("mixed", "default")
+            ti = sel.pick_track(idx, folders, [])
+        
+        if ti is None:
+            print("[narrative] Could not pick music track for audio generation")
+            return None
+        
+        _, music_path, chosen_folder, music_file = ti
+        
+        # Finalize script for TTS
+        script_for_tts = finalize_script(script_text)
+        
+        # Generate TTS
+        tts_tmp_wav = tts.synth(script_for_tts, voice_id, cfg.ELEVENLABS_API_KEY)
+        if not tts_tmp_wav or not os.path.exists(tts_tmp_wav):
+            print("[narrative] TTS synthesis failed")
+            return None
+        
+        # Generate unique session ID for output file
+        session_id = sid()
+        out_path = st.out_file(cfg.OUT_DIR, session_id)
+        
+        # Process audio
+        raw_voice = load_audio(tts_tmp_wav).set_frame_rate(44100).set_channels(2)
+        
+        # Add intro silence
+        intro = AudioSegment.silent(duration=MUSIC_INTRO_MS, frame_rate=raw_voice.frame_rate)
+        voice_with_intro = intro + raw_voice
+        
+        # Export to temp file for mixing
+        tmp_vo = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+        voice_with_intro.export(tmp_vo.name, format="wav")
+        voice_for_mix = tmp_vo.name
+        
+        # Mix voice with music
+        duration_ms_final = mixr.mix(
+            voice_for_mix,
+            music_path,
+            out_path,
+            duck_db=10.0,
+            sync_mode="retime_music_to_voice",
+            ffmpeg_bin=cfg.FFMPEG_BIN,
+        )
+        
+        # Clean up temp file
+        try:
+            os.unlink(voice_for_mix)
+        except Exception:
+            pass
+        
+        print(f"[narrative] Generated audio: {out_path}, duration: {duration_ms_final}ms")
+        
+        return {
+            "audio_path": out_path,
+            "duration_ms": duration_ms_final,
+            "session_id": session_id,
+        }
+        
+    except Exception as e:
+        print(f"[narrative] Error generating audio: {e}")
+        return None
+
+
+# Helper functions for script generation (duplicated from journey.py to avoid circular imports)
+
+def _estimate_target_words(music_ms: int, wps: float = 1.7) -> int:
+    seconds = max(1, music_ms // 1000)
+    return max(120, int(seconds * wps))
+
+
+def _word_count(txt: str) -> int:
+    return len((txt or "").strip().split())
+
+
+def _last_n_words(txt: str, n: int = 35) -> str:
+    w = (txt or "").strip().split()
+    return " ".join(w[-n:]) if len(w) > n else (txt or "").strip()
+
+
+def _sentence_safe(text: str) -> str:
+    text = (text or "").strip()
+    if not text:
+        return text
+    last_dot = text.rfind(".")
+    last_ex = text.rfind("!")
+    last_q = text.rfind("?")
+    last_punct = max(last_dot, last_ex, last_q)
+    if last_punct != -1:
+        return text[: last_punct + 1].strip()
+    return text
+
+
+def _build_continue_prompt(base_json: dict, last_tail: str, need_more: int) -> str:
+    """Build a continuation prompt for extending a script."""
+    try:
+        from ..services import prompt as pr
+        head = pr.build(base_json, target_words=None)
+        head_lines = head.splitlines()
+        head_short = "\n".join(head_lines[:10]) if len(head_lines) > 10 else head
+    except Exception:
+        head_short = "Continue the narrative."
+    
+    return (
+        f"{head_short}\n"
+        "Continue the SAME single spoken narration about the SAME unnamed person, "
+        "in the SAME day and setting.\n"
+        "Do NOT restart the story, do NOT introduce a new character name, "
+        "and do NOT describe a new morning, a new apartment, or a second beginning.\n"
+        f"Add approximately {need_more} new words.\n"
+        "No stage directions except the literal token [pause] where a slightly longer silence makes sense.\n"
+        "No summaries. Keep cadence natural. End decisively with a clear emotional landing.\n"
+        f"Pick up seamlessly from this tail: \"{last_tail}\""
     )
