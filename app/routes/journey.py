@@ -1,6 +1,7 @@
 from pathlib import Path
 import os
 import tempfile
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -8,7 +9,7 @@ from pydub import AudioSegment
 
 from ..schemas import IntakeIn, GenerateOut
 from ..db import SessionLocal
-from ..models import Sessions, Scripts, Activities, ActivitySessions, Users, MiniCheckins, TherapistPatients, TherapistAIGuidance
+from ..models import Sessions, Scripts, Activities, ActivitySessions, Users, MiniCheckins, TherapistPatients, TherapistAIGuidance, PreGeneratedAudio
 from ..services import prompt as pr
 from ..services import llm
 from ..services import selector as sel
@@ -224,6 +225,123 @@ def _get_therapist_guidance(q: Session, user_hash: str | None) -> str | None:
         return None
 
 
+# =============================================================================
+# CHANGE #1: Check for and serve pre-generated audio
+# =============================================================================
+
+
+def _check_pre_generated_audio(q: Session, user_hash: str, journey_day: int) -> PreGeneratedAudio | None:
+    """
+    Check if there's pre-generated audio ready for this user's journey day.
+    
+    Returns the PreGeneratedAudio record if found and ready, None otherwise.
+    """
+    if not user_hash or not journey_day:
+        return None
+    
+    try:
+        pre_gen = (
+            q.query(PreGeneratedAudio)
+            .filter(
+                PreGeneratedAudio.user_hash == user_hash,
+                PreGeneratedAudio.for_journey_day == journey_day,
+                PreGeneratedAudio.status == "ready",
+            )
+            .order_by(PreGeneratedAudio.created_at.desc())
+            .first()
+        )
+        
+        if pre_gen and pre_gen.audio_path:
+            print(f"[journey] Found pre-generated audio for user {user_hash} day {journey_day}, id={pre_gen.id}")
+            return pre_gen
+        
+        return None
+    except Exception as e:
+        print(f"[journey] Error checking pre-generated audio: {e}")
+        return None
+
+
+def _use_pre_generated_audio(
+    q: Session,
+    pre_gen: PreGeneratedAudio,
+    user_hash: str,
+    effective: dict,
+) -> GenerateOut:
+    """
+    Use pre-generated audio instead of generating on-demand.
+    
+    Creates a session record and marks the pre-generated audio as used.
+    """
+    c = cfg
+    
+    session_id = sid()
+    
+    # Get the audio URL
+    # The audio_path from pre-generation should be a full path or filename
+    audio_path = pre_gen.audio_path
+    
+    # Determine if it's a full path or just a filename
+    if os.path.isabs(audio_path) or audio_path.startswith(c.OUT_DIR):
+        # Full path - extract filename
+        audio_filename = Path(audio_path).name
+    else:
+        # Just a filename
+        audio_filename = audio_path
+    
+    public_url = st.public_url(c.PUBLIC_BASE_URL, audio_filename)
+    
+    # Get script excerpt
+    script_text = pre_gen.script_text or ""
+    excerpt = script_text[:600] + ("..." if len(script_text) > 600 else "")
+    
+    # Try to get duration from the audio file
+    duration_ms_final = 600000  # Default 10 minutes
+    try:
+        full_audio_path = os.path.join(c.OUT_DIR, audio_filename) if not os.path.isabs(audio_path) else audio_path
+        if os.path.exists(full_audio_path):
+            duration_ms_final = duration_ms(load_audio(full_audio_path))
+    except Exception as e:
+        print(f"[journey] Could not get duration from pre-generated audio: {e}")
+    
+    # Create session record
+    row = Sessions(
+        id=session_id,
+        user_hash=user_hash,
+        track_id=pre_gen.track_id or "pre_generated",
+        voice_id=pre_gen.voice_id or "default",
+        audio_path=audio_filename,
+        mood=pre_gen.mood or effective.get("feeling"),
+        schema_hint=pre_gen.schema_hint or effective.get("schema_choice"),
+    )
+    q.add(row)
+    
+    # Add script record
+    if script_text:
+        q.add(Scripts(session_id=session_id, script_text=script_text))
+    
+    # Mark pre-generated audio as used
+    pre_gen.status = "used"
+    pre_gen.used_at = datetime.utcnow()
+    pre_gen.used_session_id = session_id
+    
+    q.commit()
+    
+    print(f"[journey] Using pre-generated audio for session {session_id}, pre_gen_id={pre_gen.id}")
+    
+    return GenerateOut(
+        session_id=session_id,
+        audio_url=public_url,
+        duration_ms=duration_ms_final,
+        script_excerpt=excerpt,
+        script_text=script_text,
+        track_id=pre_gen.track_id or "pre_generated",
+        voice_id=pre_gen.voice_id or "default",
+        music_folder="pre_generated",
+        music_file=audio_filename,
+        journey_day=pre_gen.for_journey_day,
+    )
+
+
 
 
 @r.post("/api/journey/generate", response_model=GenerateOut)
@@ -313,6 +431,17 @@ def generate(x: IntakeIn, q: Session = Depends(db)):
             music_file=DAY1_STATIC_AUDIO_FILENAME,
             journey_day=1,
         )
+
+    # =============================================================================
+    # CHANGE #1: Check for pre-generated audio for Day 2+
+    # =============================================================================
+    if journey_day is not None and journey_day >= 2 and x.user_hash:
+        pre_gen = _check_pre_generated_audio(q, x.user_hash, journey_day)
+        if pre_gen:
+            print(f"[journey] Found pre-generated audio for day {journey_day}, using it instead of generating")
+            return _use_pre_generated_audio(q, pre_gen, x.user_hash, effective)
+        else:
+            print(f"[journey] No pre-generated audio found for day {journey_day}, generating on-demand")
 
     idx = sel.load_index()
 
