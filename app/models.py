@@ -254,6 +254,62 @@ class MiniCheckins(Base):
 
 
 # =============================================================================
+# PRE-GENERATED AUDIO FOR DAY 2+ USERS (CHANGE #1)
+# =============================================================================
+
+
+class PreGeneratedAudio(Base):
+    """
+    Stores pre-generated audio for Day 2+ users.
+    
+    CHANGE #1: Audio is generated after session feedback is submitted,
+    so the next session can start instantly without generation delay.
+    
+    The audio is generated using chills-based personalization from the
+    user's last session feedback (emotion_word, chills_detail, session_insight).
+    """
+    __tablename__ = "pre_generated_audio"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_hash = Column(String, index=True, nullable=False)
+    
+    # The journey day this audio is FOR (e.g., if user just completed day 2, this is for day 3)
+    for_journey_day = Column(Integer, nullable=False, index=True)
+    
+    # Audio file path (same format as Sessions.audio_path)
+    audio_path = Column(String, nullable=False)
+    
+    # Script text (for reference/debugging)
+    script_text = Column(Text, nullable=True)
+    
+    # Generation parameters used
+    track_id = Column(String, nullable=True)
+    voice_id = Column(String, nullable=True)
+    mood = Column(String, nullable=True)
+    schema_hint = Column(String, nullable=True)
+    
+    # Chills-based context used for generation
+    emotion_word = Column(String, nullable=True)
+    chills_detail = Column(Text, nullable=True)
+    session_insight = Column(Text, nullable=True)
+    
+    # Status: pending, generating, ready, used, expired, failed
+    status = Column(String, default="pending", index=True)
+    
+    # Error message if generation failed
+    error_message = Column(Text, nullable=True)
+    
+    # When this audio was used (consumed)
+    used_at = Column(DateTime(timezone=True), nullable=True)
+    
+    # Session ID created when this audio was used
+    used_session_id = Column(String, nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+# =============================================================================
 # THERAPIST DASHBOARD MODELS (New)
 # =============================================================================
 
