@@ -202,6 +202,27 @@ def _generate_audio_for_record(pre_gen_id: int):
         
         print(f"[feedback] Successfully pre-generated audio for user {pre_gen.user_hash} day {pre_gen.for_journey_day}, path: {pre_gen.audio_path}")
         
+        # =================================================================
+        # CHANGE #7: Send push notification that audio is ready
+        # =================================================================
+        try:
+            from ..services import push as push_service
+            
+            push_result = push_service.send_audio_ready_notification(
+                db=db_session,
+                user_hash=pre_gen.user_hash,
+                journey_day=pre_gen.for_journey_day,
+            )
+            
+            if push_result.get("sent", 0) > 0:
+                print(f"[feedback] Sent push notification to user {pre_gen.user_hash} for day {pre_gen.for_journey_day}")
+            else:
+                print(f"[feedback] No push subscriptions for user {pre_gen.user_hash}")
+                
+        except Exception as push_error:
+            # Don't fail if push notification fails
+            print(f"[feedback] Error sending push notification: {push_error}")
+        
     except Exception as e:
         print(f"[feedback] Error generating audio for pre-gen id={pre_gen_id}: {e}")
         try:
