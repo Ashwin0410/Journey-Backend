@@ -474,7 +474,7 @@ def _to_activity_out(act: models.Activities) -> schemas.ActivityRecommendationOu
     return schemas.ActivityRecommendationOut(
         id=act.id,
         title=act.title,
-        description=act.description,
+        description=act.description or "",  # FIX: Ensure description is never None
         life_area=act.life_area,
         effort_level=act.effort_level,
         reward_type=act.reward_type,
@@ -503,7 +503,7 @@ def _therapist_activity_to_out(ta: models.TherapistSuggestedActivities) -> schem
     return schemas.ActivityRecommendationOut(
         id=virtual_id,
         title=ta.title,
-        description=ta.description,
+        description=ta.description or "",  # FIX: Ensure description is never None
         life_area=ta.category or "General",
         effort_level=ta.barrier_level.lower() if ta.barrier_level else "low",
         reward_type="other",
@@ -736,7 +736,7 @@ def commit_activity(
         now = datetime.utcnow()
         new_activity = models.Activities(
             title=ta.title,
-            description=ta.description,
+            description=ta.description or "",  # FIX: Ensure description is never None
             life_area=ta.category or "General",
             effort_level=ta.barrier_level.lower() if ta.barrier_level else "low",
             reward_type="other",
@@ -925,11 +925,12 @@ def get_library(
             # Use negative ID to distinguish from regular activities
             virtual_id = -ta.id
             
+            # FIX: Ensure description is never None to prevent Pydantic validation error
             out.append(
                 schemas.ActivityOut(
                     id=virtual_id,
-                    title=ta.title,
-                    description=ta.description,
+                    title=ta.title or "Therapist Activity",
+                    description=ta.description or "",  # FIX: Default to empty string if None
                     life_area=ta.category or "General",
                     effort_level=ta.barrier_level.lower() if ta.barrier_level else "low",
                     reward_type="other",
@@ -955,8 +956,8 @@ def get_library(
         out.append(
             schemas.ActivityOut(
                 id=a.id,
-                title=a.title,
-                description=a.description,
+                title=a.title or "Activity",
+                description=a.description or "",  # FIX: Ensure description is never None
                 life_area=a.life_area,
                 effort_level=a.effort_level,
                 reward_type=a.reward_type,
@@ -1003,7 +1004,7 @@ def start_activity(
         now = datetime.utcnow()
         new_activity = models.Activities(
             title=ta.title,
-            description=ta.description,
+            description=ta.description or "",  # FIX: Ensure description is never None
             life_area=ta.category or "General",
             effort_level=ta.barrier_level.lower() if ta.barrier_level else "low",
             reward_type="other",
@@ -1136,7 +1137,7 @@ def swap_activity(
         now = datetime.utcnow()
         new_activity = models.Activities(
             title=ta.title,
-            description=ta.description,
+            description=ta.description or "",  # FIX: Ensure description is never None
             life_area=ta.category or "General",
             effort_level=ta.barrier_level.lower() if ta.barrier_level else "low",
             reward_type="other",
