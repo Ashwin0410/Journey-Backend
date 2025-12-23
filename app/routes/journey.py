@@ -2,6 +2,7 @@ from pathlib import Path
 import os
 import tempfile
 from datetime import datetime
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -115,6 +116,8 @@ def _fallback_from_history(q: Session, user_hash: str | None) -> dict:
     For Day 2+ users: Uses chills-based context from last session's feedback
     (emotion_word, session_insight, chills_detail) instead of mini check-in.
     
+    Also includes intake weekly plan data (life_area, life_focus, week_actions).
+    
     Falls back to session/activity history if no feedback available.
     """
     out = {
@@ -124,17 +127,22 @@ def _fallback_from_history(q: Session, user_hash: str | None) -> dict:
         "goal_today": None,
         "place": None,
         "journey_day": None,
-        # New chills-based fields
+        # Chills-based fields
         "last_insight": None,
         "chills_level": None,
         "emotion_word": None,
         "chills_detail": None,
         "had_chills": False,
+        # NEW: Intake weekly plan fields
+        "life_area": None,
+        "life_focus": None,
+        "week_actions": [],
     }
     if not user_hash:
         return out
 
     # First, try to get chills-based context from last session's feedback
+    # This now also includes intake data (life_area, life_focus, week_actions)
     chills_ctx = narrative_service.get_chills_context_for_generation(q, user_hash)
     
     # If we have chills context with meaningful data, use it
@@ -149,7 +157,17 @@ def _fallback_from_history(q: Session, user_hash: str | None) -> dict:
         out["emotion_word"] = chills_ctx.get("emotion_word")
         out["chills_detail"] = chills_ctx.get("chills_detail")
         out["had_chills"] = chills_ctx.get("had_chills", False)
+        # NEW: Get intake weekly plan data
+        out["life_area"] = chills_ctx.get("life_area")
+        out["life_focus"] = chills_ctx.get("life_focus")
+        out["week_actions"] = chills_ctx.get("week_actions", [])
     else:
+        # Even without chills context, still get intake weekly plan data
+        out["life_area"] = chills_ctx.get("life_area")
+        out["life_focus"] = chills_ctx.get("life_focus")
+        out["week_actions"] = chills_ctx.get("week_actions", [])
+        out["postal_code"] = chills_ctx.get("postal_code")
+        
         # Fallback to old behavior: get from last session directly
         last_sess = (
             q.query(Sessions)
@@ -365,12 +383,16 @@ def generate(x: IntakeIn, q: Session = Depends(db)):
         "goal_today": eff(getattr(x, "goal_today", None), fb.get("goal_today"), "show up for the day"),
         "place": eff(getattr(x, "place", None), fb.get("place"), None),
         "journey_day": getattr(x, "journey_day", None) or fb.get("journey_day", None),
-        # New chills-based fields for prompt building
+        # Chills-based fields for prompt building
         "last_insight": fb.get("last_insight"),
         "chills_level": fb.get("chills_level"),
         "emotion_word": fb.get("emotion_word"),
         "chills_detail": fb.get("chills_detail"),
         "had_chills": fb.get("had_chills", False),
+        # NEW: Intake weekly plan fields for prompt building
+        "life_area": fb.get("life_area"),
+        "life_focus": fb.get("life_focus"),
+        "week_actions": fb.get("week_actions", []),
     }
 
     # ISSUE 8: Check if Day 1 - return static audio without generation
@@ -490,6 +512,11 @@ def generate(x: IntakeIn, q: Session = Depends(db)):
     jdict["emotion_word"] = effective.get("emotion_word")
     jdict["chills_detail"] = effective.get("chills_detail")
     jdict["had_chills"] = effective.get("had_chills", False)
+    
+    # NEW: Add intake weekly plan fields for prompt building
+    jdict["life_area"] = effective.get("life_area")
+    jdict["life_focus"] = effective.get("life_focus")
+    jdict["week_actions"] = effective.get("week_actions", [])
     
     # Fetch and add therapist guidance
     therapist_guidance = _get_therapist_guidance(q, x.user_hash)
