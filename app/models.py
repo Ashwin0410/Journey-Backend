@@ -69,10 +69,19 @@ class JourneyEvent(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+# =============================================================================
+# ACTIVITIES TABLE - BUG FIX: Added user_hash for per-user activity scoping
+# =============================================================================
 
 class Activities(Base):
     __tablename__ = "activities"
     id = Column(Integer, primary_key=True, index=True)
+    
+    # BUG FIX: Added user_hash to scope activities to individual users
+    # Without this, activities generated during intake were shared globally
+    # causing Patient B to see Patient A's personalized activities
+    user_hash = Column(String, index=True, nullable=True)
+    
     title = Column(String, nullable=False)
     description = Column(Text, nullable=False)
     life_area = Column(String, index=True)        
