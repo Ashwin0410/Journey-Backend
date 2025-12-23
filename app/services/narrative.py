@@ -320,13 +320,39 @@ def _build_hero_narrative(
     }
 
 
-def _pick_recommended_activity(db: Session) -> Optional[schemas.ActivityRecommendationOut]:
-    row = (
-        db.query(models.Activities)
-        .filter(models.Activities.is_active == True)
-        .order_by(models.Activities.created_at.desc())
-        .first()
-    )
+# =============================================================================
+# BUG FIX: _pick_recommended_activity now filters by user_hash
+# =============================================================================
+
+def _pick_recommended_activity(
+    db: Session, 
+    user_hash: Optional[str] = None  # BUG FIX: Added user_hash parameter
+) -> Optional[schemas.ActivityRecommendationOut]:
+    """
+    Pick a recommended activity for the user.
+    
+    BUG FIX: Now filters by user_hash to return only the user's own activities,
+    preventing cross-user data pollution where Patient B would see Patient A's activities.
+    
+    Args:
+        db: Database session
+        user_hash: User identifier to filter activities (optional for backward compatibility)
+    
+    Returns:
+        ActivityRecommendationOut or None if no activities found
+    """
+    # BUG FIX: Build query with user_hash filter
+    query = db.query(models.Activities).filter(models.Activities.is_active == True)
+    
+    if user_hash:
+        # Return only this user's activities (or activities with no user_hash for backward compatibility)
+        query = query.filter(
+            (models.Activities.user_hash == user_hash) | 
+            (models.Activities.user_hash == None)
+        )
+    
+    row = query.order_by(models.Activities.created_at.desc()).first()
+    
     if not row:
         return None
 
@@ -348,6 +374,10 @@ def _pick_recommended_activity(db: Session) -> Optional[schemas.ActivityRecommen
         default_duration_min=row.default_duration_min,
         location_label=row.location_label,
         tags=tags,
+        user_hash=row.user_hash,  # BUG FIX: Include user_hash in output
+        lat=getattr(row, 'lat', None),
+        lng=getattr(row, 'lng', None),
+        place_id=getattr(row, 'place_id', None),
     )
 
 
@@ -376,7 +406,12 @@ def _extract_postal_code(db: Session, user_hash: Optional[str]) -> Optional[str]
 
 
 def build_today_summary(db: Session, user: models.Users) -> schemas.TodaySummaryOut:
-
+    """
+    Build the today summary for a user.
+    
+    BUG FIX: Now passes user_hash to _pick_recommended_activity to ensure
+    the user only sees their own personalized activities.
+    """
     now = datetime.utcnow()
     greeting = _time_of_day_greeting(now)
     fname = _first_name(user.name)
@@ -401,7 +436,8 @@ def build_today_summary(db: Session, user: models.Users) -> schemas.TodaySummary
     cooldown_remaining = int(j_state.get("cooldown_minutes_remaining", 0))
 
     
-    rec_act = _pick_recommended_activity(db)
+    # BUG FIX: Pass user_hash to get user-specific activity
+    rec_act = _pick_recommended_activity(db, user.user_hash)
 
 
     postal_code = _extract_postal_code(db, user.user_hash)
