@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import os
 import tempfile
@@ -156,6 +157,56 @@ def _last_session_feedback(db: Session, user_hash: str) -> Dict[str, Any]:
     }
 
 
+def _extract_intake_weekly_plan(db: Session, user_hash: Optional[str]) -> Dict[str, Any]:
+    """
+    Extract weekly plan data from user's clinical intake.
+    
+    Returns:
+        Dict with life_area, life_focus, and week_actions (list of strings)
+    """
+    out = {
+        "life_area": None,
+        "life_focus": None,
+        "week_actions": [],
+    }
+    
+    if not user_hash:
+        return out
+    
+    if not hasattr(models, "ClinicalIntake"):
+        return out
+    
+    try:
+        intake = (
+            db.query(models.ClinicalIntake)
+            .filter(models.ClinicalIntake.user_hash == user_hash)
+            .order_by(models.ClinicalIntake.created_at.desc())
+            .first()
+        )
+        
+        if not intake:
+            return out
+        
+        # Get life_area and life_focus
+        out["life_area"] = getattr(intake, "life_area", None)
+        out["life_focus"] = getattr(intake, "life_focus", None)
+        
+        # Parse week_actions_json
+        week_actions_json = getattr(intake, "week_actions_json", None)
+        if week_actions_json:
+            try:
+                actions = json.loads(week_actions_json)
+                if isinstance(actions, list):
+                    out["week_actions"] = [str(a) for a in actions if a]
+            except (json.JSONDecodeError, TypeError):
+                pass
+        
+    except Exception as e:
+        print(f"[narrative] Error extracting intake weekly plan: {e}")
+    
+    return out
+
+
 def get_chills_context_for_generation(db: Session, user_hash: Optional[str]) -> Dict[str, Any]:
     """
     Get chills-based context from the last session's feedback for use in 
@@ -163,6 +214,9 @@ def get_chills_context_for_generation(db: Session, user_hash: Optional[str]) -> 
     
     This replaces the mini check-in data with insights from the user's
     last session feedback (chills, emotion_word, session_insight, etc.)
+    
+    Also fetches intake weekly plan data (life_area, life_focus, week_actions)
+    for personalization.
     
     Returns a dict with:
         - feeling: derived from emotion_word or mood
@@ -175,6 +229,9 @@ def get_chills_context_for_generation(db: Session, user_hash: Optional[str]) -> 
         - had_chills: boolean
         - postal_code: from clinical intake
         - place: inferred from chills_detail or default
+        - life_area: from clinical intake (e.g., "Relationships")
+        - life_focus: from clinical intake (e.g., "Reconnecting with a friend")
+        - week_actions: list of specific actions from clinical intake
     """
     out = {
         "feeling": None,
@@ -187,15 +244,27 @@ def get_chills_context_for_generation(db: Session, user_hash: Optional[str]) -> 
         "had_chills": False,
         "postal_code": None,
         "place": None,
+        # NEW: Intake weekly plan fields
+        "life_area": None,
+        "life_focus": None,
+        "week_actions": [],
     }
     
     if not user_hash:
         return out
     
+    # NEW: Get intake weekly plan data
+    intake_plan = _extract_intake_weekly_plan(db, user_hash)
+    out["life_area"] = intake_plan.get("life_area")
+    out["life_focus"] = intake_plan.get("life_focus")
+    out["week_actions"] = intake_plan.get("week_actions", [])
+    
     # Get last session feedback
     session_info = _last_session_feedback(db, user_hash)
     
     if not session_info.get("has_session"):
+        # Even without session, we still have intake data
+        out["postal_code"] = _extract_postal_code(db, user_hash)
         return out
     
     # Extract from session
@@ -359,7 +428,6 @@ def _pick_recommended_activity(
     tags: List[str] = []
     if row.tags_json:
         try:
-            import json 
             tags = json.loads(row.tags_json) or []
         except Exception:
             tags = []
@@ -535,6 +603,10 @@ def generate_narrative_script(
             jdict["had_chills"] = chills_context.get("had_chills", False)
             jdict["goal_today"] = chills_context.get("goal_today") or "continue the journey"
             jdict["place"] = chills_context.get("place")
+            # NEW: Add intake weekly plan data
+            jdict["life_area"] = chills_context.get("life_area")
+            jdict["life_focus"] = chills_context.get("life_focus")
+            jdict["week_actions"] = chills_context.get("week_actions", [])
         
         # Choose narrative arc
         arc_name = pr.choose_arc(jdict)
