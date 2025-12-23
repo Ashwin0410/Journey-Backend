@@ -41,6 +41,40 @@ if Base is not None and engine is not None:
         Base.metadata.create_all(bind=engine)
     except Exception:
         pass
+
+
+# =============================================================================
+# AUTO-MIGRATION: Add user_hash column to activities table
+# =============================================================================
+def run_migrations():
+    """Run database migrations on startup."""
+    if engine is None:
+        return
+    try:
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            # Check if user_hash column exists in activities table
+            result = conn.execute(text("PRAGMA table_info(activities)"))
+            columns = [row[1] for row in result.fetchall()]
+            
+            if 'user_hash' not in columns:
+                conn.execute(text("ALTER TABLE activities ADD COLUMN user_hash TEXT"))
+                conn.commit()
+                print("[migration] Added user_hash column to activities table")
+            
+            # Check if index exists
+            result = conn.execute(text("SELECT name FROM sqlite_master WHERE type='index' AND name='ix_activities_user_hash'"))
+            if not result.fetchone():
+                conn.execute(text("CREATE INDEX ix_activities_user_hash ON activities (user_hash)"))
+                conn.commit()
+                print("[migration] Created index ix_activities_user_hash")
+    except Exception as e:
+        print(f"[migration] Error running migrations: {e}")
+
+run_migrations()
+# =============================================================================
+
+
 from app.routes.health import r as health_r
 from app.routes.journey import r as journey_r
 from app.routes.feedback import r as feedback_r
