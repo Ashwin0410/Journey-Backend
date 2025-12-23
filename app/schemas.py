@@ -62,7 +62,9 @@ class JourneyEventIn(BaseModel):
     payload: Dict[str, Any] | None = None  # optional extra data (e.g. note text)
 
 
-
+# =============================================================================
+# ACTIVITY SCHEMAS - BUG FIX: Added user_hash for per-user activity scoping
+# =============================================================================
 
 class ActivityBase(BaseModel):
     title: str
@@ -73,6 +75,8 @@ class ActivityBase(BaseModel):
     default_duration_min: int | None = None
     location_label: str | None = None
     tags: List[str] | None = None
+    # BUG FIX: Added user_hash to scope activities to individual users
+    user_hash: str | None = None
     # Google Maps coordinates for directions
     lat: float | None = None
     lng: float | None = None
@@ -81,13 +85,18 @@ class ActivityBase(BaseModel):
 
 class ActivityOut(ActivityBase):
     id: int
+    # BUG FIX: Include user_hash in output for verification
+    user_hash: str | None = None
 
     class Config:
         orm_mode = True
 
 
 class ActivityRecommendationOut(ActivityOut):
-   
+    """
+    Extended activity output for recommendations.
+    Inherits user_hash from ActivityOut.
+    """
     pass
 
 
