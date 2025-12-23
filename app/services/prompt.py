@@ -12,6 +12,7 @@ Stimuli Deactivate Maladaptive Schema" (2024)
 """
 
 from textwrap import dedent
+from typing import List, Optional
 
 
 # =============================================================================
@@ -256,6 +257,46 @@ def _build_therapist_guidance(j: dict) -> str:
     """
 
 
+def _build_weekly_plan_context(j: dict) -> str:
+    """
+    Build a prompt section that incorporates the user's weekly plan
+    from their clinical intake (life_area, life_focus, week_actions).
+    
+    This helps the script feel personally relevant by connecting to
+    what the user has committed to working on this week.
+    """
+    life_area = j.get("life_area")
+    life_focus = j.get("life_focus")
+    week_actions: Optional[List[str]] = j.get("week_actions")
+    
+    # Check if we have any weekly plan data
+    if not life_area and not life_focus and not (week_actions and len(week_actions) > 0):
+        return ""
+    
+    lines = []
+    
+    if life_area:
+        lines.append(f"- This week, they're focusing on: \"{life_area}\"")
+    
+    if life_focus:
+        lines.append(f"- Specifically, they want to work on: \"{life_focus}\"")
+    
+    if week_actions and len(week_actions) > 0:
+        # Limit to first 3 actions to keep prompt focused
+        actions_to_show = week_actions[:3]
+        actions_formatted = ", ".join(f"\"{a}\"" for a in actions_to_show)
+        lines.append(f"- Actions they committed to: {actions_formatted}")
+    
+    if not lines:
+        return ""
+    
+    return (
+        "\n    Their weekly commitment (from intake):\n    "
+        + "\n    ".join(lines)
+        + "\n    Reference their specific focus area naturally in the LANDING section.\n"
+    )
+
+
 def _get_schema_content(schema_key: str) -> dict:
     """Get schema info, with fallback for unknown schemas."""
     
@@ -332,6 +373,7 @@ def build(j: dict, target_words: int | None = None) -> str:
     # Build personalization sections
     chills_context = _build_chills_context(j)
     therapist_guidance = _build_therapist_guidance(j)
+    weekly_plan_context = _build_weekly_plan_context(j)  # NEW: Add weekly plan context
     
     # Word count guidance
     length_hint = ""
@@ -358,7 +400,7 @@ def build(j: dict, target_words: int | None = None) -> str:
     - Today's intention: {goal} (because {why})
     - Recent win: {win}
     - Current struggle: {hard}
-    {chills_context}{therapist_guidance}
+    {chills_context}{therapist_guidance}{weekly_plan_context}
     === STRUCTURE: SCHEMA VALIDATION → SCHEMA CONTRADICTION ===
     
     PART 1 — VALIDATION (acknowledge their pain, make them feel deeply seen):
