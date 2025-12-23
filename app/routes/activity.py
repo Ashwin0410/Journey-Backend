@@ -178,6 +178,10 @@ def _generate_activities_via_llm(
     chills_detail: Optional[str] = None,
     last_insight: Optional[str] = None,
     chills_level: Optional[str] = None,
+    # NEW: Intake weekly plan fields
+    life_area: Optional[str] = None,
+    life_focus: Optional[str] = None,
+    week_actions: Optional[List[str]] = None,
 ) -> List[schemas.ActivityBase]:
 
     context_bits: List[str] = []
@@ -191,6 +195,15 @@ def _generate_activities_via_llm(
         context_bits.append(f"preferred environment: {place}")
     if postal_code:
         context_bits.append(f"location_hint: {postal_code}")
+    
+    # NEW: Add intake weekly plan context
+    if life_area:
+        context_bits.append(f"life area focus this week: {life_area}")
+    if life_focus:
+        context_bits.append(f"specific focus within that area: {life_focus}")
+    if week_actions and len(week_actions) > 0:
+        actions_str = "; ".join(week_actions[:5])  # Limit to 5 actions
+        context_bits.append(f"user's committed actions this week: {actions_str}")
     
     # Add chills-based context for better personalization
     if emotion_word:
@@ -293,6 +306,27 @@ def _generate_activities_via_llm(
         elif chills_level == "medium":
             chills_hint += "They noticed subtle shifts - suggest gentle activities that continue this exploration.\n"
 
+    # NEW: Build weekly plan hint for the system message
+    weekly_plan_hint = ""
+    if life_area or life_focus or (week_actions and len(week_actions) > 0):
+        weekly_plan_hint = (
+            "\n\nUSER'S WEEKLY COMMITMENT:\n"
+            "The user has set specific intentions for this week. "
+            "Design activities that support or are variations of their commitments:\n"
+        )
+        if life_area:
+            weekly_plan_hint += f"- Life area they're focusing on: '{life_area}'\n"
+        if life_focus:
+            weekly_plan_hint += f"- Specific focus: '{life_focus}'\n"
+        if week_actions and len(week_actions) > 0:
+            weekly_plan_hint += "- Actions they committed to:\n"
+            for action in week_actions[:5]:  # Limit to 5
+                weekly_plan_hint += f"  • {action}\n"
+        weekly_plan_hint += (
+            "Generate activities that align with these commitments. "
+            "The GOAL-BASED activities (4-6) should especially reflect their weekly plan.\n"
+        )
+
     system_msg = (
         "You are a behavioural activation coach designing very small, realistic, "
         "real-world activities for a mental health app.\n"
@@ -312,6 +346,7 @@ def _generate_activities_via_llm(
         "You can use BA flavours like Movement, Connection, Creative, Grounding, "
         "or Self-compassion. Use tags to encode this.\n"
         f"{chills_hint}"
+        f"{weekly_plan_hint}"
     )
 
     user_msg = (
@@ -380,7 +415,7 @@ def _generate_activities_via_llm(
         try:
             title = (item.get("title") or "").strip() or "Small step"
             description = (item.get("description") or "").strip() or "Take a small helpful step."
-            life_area = item.get("life_area", "Meaning")
+            life_area_item = item.get("life_area", "Meaning")
             effort_level = item.get("effort_level", "low")
             reward_type = item.get("reward_type")
             default_duration_min = item.get("default_duration_min") or 10
@@ -405,7 +440,7 @@ def _generate_activities_via_llm(
             act = schemas.ActivityBase(
                 title=title,
                 description=description,
-                life_area=life_area,
+                life_area=life_area_item,
                 effort_level=effort_level,
                 reward_type=reward_type,
                 default_duration_min=default_duration_min,
@@ -567,6 +602,8 @@ def _fallback_context_from_history(db: Session, user_hash: Optional[str]) -> dic
     For Day 2+ users: Uses chills-based context from last session's feedback
     (emotion_word, session_insight, chills_detail) instead of mini check-in.
     
+    Also includes intake weekly plan data (life_area, life_focus, week_actions).
+    
     Falls back to session/activity history if no feedback available.
     """
     out = {
@@ -580,11 +617,16 @@ def _fallback_context_from_history(db: Session, user_hash: Optional[str]) -> dic
         "chills_detail": None,
         "last_insight": None,
         "chills_level": None,
+        # NEW: Intake weekly plan fields
+        "life_area": None,
+        "life_focus": None,
+        "week_actions": [],
     }
     if not user_hash:
         return out
 
     # First, try to get chills-based context from last session's feedback
+    # This now also includes intake data (life_area, life_focus, week_actions)
     chills_ctx = narrative_service.get_chills_context_for_generation(db, user_hash)
     
     # If we have chills context with meaningful data, use it
@@ -598,7 +640,17 @@ def _fallback_context_from_history(db: Session, user_hash: Optional[str]) -> dic
         out["chills_detail"] = chills_ctx.get("chills_detail")
         out["last_insight"] = chills_ctx.get("last_insight")
         out["chills_level"] = chills_ctx.get("chills_level")
+        # NEW: Get intake weekly plan data
+        out["life_area"] = chills_ctx.get("life_area")
+        out["life_focus"] = chills_ctx.get("life_focus")
+        out["week_actions"] = chills_ctx.get("week_actions", [])
         return out
+
+    # Even without chills context, still get intake weekly plan data
+    out["life_area"] = chills_ctx.get("life_area")
+    out["life_focus"] = chills_ctx.get("life_focus")
+    out["week_actions"] = chills_ctx.get("week_actions", [])
+    out["postal_code"] = chills_ctx.get("postal_code")
 
     # Fallback to old behavior if no chills context
     try:
@@ -811,6 +863,10 @@ def get_recommendation(
     chills_detail: Optional[str] = None
     last_insight: Optional[str] = None
     chills_level: Optional[str] = None
+    # NEW: Intake weekly plan fields
+    intake_life_area: Optional[str] = None
+    intake_life_focus: Optional[str] = None
+    week_actions: Optional[List[str]] = None
 
     if user_hash:
         fb = _fallback_context_from_history(db, user_hash)
@@ -828,8 +884,12 @@ def get_recommendation(
         chills_detail = fb.get("chills_detail")
         last_insight = fb.get("last_insight")
         chills_level = fb.get("chills_level")
+        # NEW: Get intake weekly plan fields
+        intake_life_area = fb.get("life_area")
+        intake_life_focus = fb.get("life_focus")
+        week_actions = fb.get("week_actions", [])
 
-    print(f"[activity] /recommendation called with postal_code='{postal_code}', user_hash='{user_hash}'")
+    print(f"[activity] /recommendation called with postal_code='{postal_code}', user_hash='{user_hash}', life_area='{intake_life_area}', life_focus='{intake_life_focus}'")
 
     generated = _generate_activities_via_llm(
         mood=mood,
@@ -843,6 +903,10 @@ def get_recommendation(
         chills_detail=chills_detail,
         last_insight=last_insight,
         chills_level=chills_level,
+        # NEW: Pass intake weekly plan fields
+        life_area=intake_life_area,
+        life_focus=intake_life_focus,
+        week_actions=week_actions,
     )
 
     # BUG FIX: Pass user_hash when storing activities
@@ -857,7 +921,7 @@ def get_recommendation(
             print(f"[activity] Adding {len(therapist_activities)} therapist-suggested activities for patient")
             therapist_activity_outs = [_therapist_activity_to_out(ta) for ta in therapist_activities]
 
-    # Filter LLM activities by life_area if specified
+    # Filter LLM activities by life_area if specified (query param takes precedence)
     if life_area:
         filtered = [
             r_
