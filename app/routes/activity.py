@@ -426,19 +426,29 @@ def _generate_activities_via_llm(
     return activities
 
 
-# --------- Store generated activities in DB ---------
+# =============================================================================
+# BUG FIX: Store generated activities with user_hash for per-user scoping
+# =============================================================================
 
 
 def _store_generated_activities(
     db: Session,
     *,
     activities: List[schemas.ActivityBase],
+    user_hash: Optional[str] = None,  # BUG FIX: Added user_hash parameter
 ) -> List[models.Activities]:
+    """
+    Store generated activities in the database.
+    
+    BUG FIX: Now accepts user_hash to scope activities to individual users.
+    Without this, activities were stored globally and shared across all users.
+    """
     now = datetime.utcnow()
     rows: List[models.Activities] = []
 
     for a in activities:
         row = models.Activities(
+            user_hash=user_hash,  # BUG FIX: Store user_hash with activity
             title=a.title,
             description=a.description,
             life_area=a.life_area,
@@ -481,6 +491,7 @@ def _to_activity_out(act: models.Activities) -> schemas.ActivityRecommendationOu
         default_duration_min=act.default_duration_min,
         location_label=act.location_label,
         tags=tags,
+        user_hash=act.user_hash,  # BUG FIX: Include user_hash in output
         lat=act.lat,
         lng=act.lng,
         place_id=act.place_id,
@@ -510,6 +521,7 @@ def _therapist_activity_to_out(ta: models.TherapistSuggestedActivities) -> schem
         default_duration_min=ta.duration_minutes or 15,
         location_label="as suggested by therapist",
         tags=tags,
+        user_hash=None,  # Therapist activities don't have user_hash directly
         lat=None,
         lng=None,
         place_id=None,
@@ -729,12 +741,14 @@ def commit_activity(
             raise HTTPException(status_code=404, detail="Therapist activity not found")
         
         # Create a real Activity from the therapist suggestion for this commit
+        # BUG FIX: Include user_hash when creating activity from therapist suggestion
         tags = ["+ TherapistSuggested"]
         if ta.category:
             tags.append(ta.category)
         
         now = datetime.utcnow()
         new_activity = models.Activities(
+            user_hash=payload.user_hash,  # BUG FIX: Scope to this user
             title=ta.title,
             description=ta.description or "",  # FIX: Ensure description is never None
             life_area=ta.category or "General",
@@ -815,7 +829,7 @@ def get_recommendation(
         last_insight = fb.get("last_insight")
         chills_level = fb.get("chills_level")
 
-    print(f"[activity] /recommendation called with postal_code='{postal_code}'")
+    print(f"[activity] /recommendation called with postal_code='{postal_code}', user_hash='{user_hash}'")
 
     generated = _generate_activities_via_llm(
         mood=mood,
@@ -831,7 +845,8 @@ def get_recommendation(
         chills_level=chills_level,
     )
 
-    rows = _store_generated_activities(db, activities=generated)
+    # BUG FIX: Pass user_hash when storing activities
+    rows = _store_generated_activities(db, activities=generated, user_hash=user_hash)
 
     # CHANGE #4: Get therapist-suggested activities for THIS SPECIFIC PATIENT ONLY
     # These are returned directly without creating global Activity rows
@@ -882,6 +897,10 @@ def get_recommendation(
     return schemas.ActivityRecommendationListOut(activities=recs)
 
 
+# =============================================================================
+# BUG FIX: Activity library now filters by user_hash
+# =============================================================================
+
 @r.get(
     "/library",
     response_model=schemas.ActivityListOut,
@@ -894,22 +913,29 @@ def get_recommendation(
     include_in_schema=False,
 )
 def get_library(
-    user_hash: Optional[str] = Query(None, description="User hash to include therapist-suggested activities"),
+    user_hash: Optional[str] = Query(None, description="User hash to filter activities and include therapist-suggested activities"),
     db: Session = Depends(get_db),
 ):
     """
-    Return the latest 6 active activities plus any therapist-suggested activities for the user.
+    Return the latest 6 active activities for the user plus any therapist-suggested activities.
+    
+    BUG FIX: Now filters activities by user_hash to prevent cross-user data pollution.
+    Previously, all activities were returned globally regardless of which user created them.
     
     CHANGE #4: Therapist activities are now patient-specific and not converted to global Activities.
     """
-    # Get latest 6 app activities
-    acts = (
-        db.query(models.Activities)
-        .filter(models.Activities.is_active == True)
-        .order_by(models.Activities.created_at.desc())
-        .limit(6)
-        .all()
-    )
+    # BUG FIX: Build query with user_hash filter
+    query = db.query(models.Activities).filter(models.Activities.is_active == True)
+    
+    if user_hash:
+        # Return only this user's activities (or activities with no user_hash for backward compatibility)
+        query = query.filter(
+            (models.Activities.user_hash == user_hash) | 
+            (models.Activities.user_hash == None)
+        )
+    
+    # Get latest 6 activities for this user
+    acts = query.order_by(models.Activities.created_at.desc()).limit(6).all()
 
     out: List[schemas.ActivityOut] = []
     
@@ -937,6 +963,7 @@ def get_library(
                     default_duration_min=ta.duration_minutes or 15,
                     location_label="as suggested by therapist",
                     tags=tags,
+                    user_hash=None,
                     lat=None,
                     lng=None,
                     place_id=None,
@@ -945,7 +972,7 @@ def get_library(
         if therapist_activities:
             print(f"[activity] Library: Added {len(therapist_activities)} therapist activities for user {user_hash}")
 
-    # Then add app activities
+    # Then add user's activities
     for a in acts:
         tags: List[str] = []
         if a.tags_json:
@@ -964,6 +991,7 @@ def get_library(
                 default_duration_min=a.default_duration_min,
                 location_label=a.location_label,
                 tags=tags,
+                user_hash=a.user_hash,  # BUG FIX: Include user_hash in output
                 lat=a.lat,
                 lng=a.lng,
                 place_id=a.place_id,
@@ -997,12 +1025,14 @@ def start_activity(
             raise HTTPException(status_code=404, detail="Therapist activity not found")
         
         # Create a real Activity from the therapist suggestion
+        # BUG FIX: Include user_hash when creating activity
         tags = ["+ TherapistSuggested"]
         if ta.category:
             tags.append(ta.category)
         
         now = datetime.utcnow()
         new_activity = models.Activities(
+            user_hash=payload.user_hash,  # BUG FIX: Scope to this user
             title=ta.title,
             description=ta.description or "",  # FIX: Ensure description is never None
             life_area=ta.category or "General",
@@ -1076,6 +1106,7 @@ def complete_activity(
                 .filter(
                     models.Activities.title == ta.title,
                     models.Activities.description == ta.description,
+                    models.Activities.user_hash == payload.user_hash,  # BUG FIX: Filter by user
                     models.Activities.is_active == True,
                 )
                 .order_by(models.Activities.created_at.desc())
@@ -1130,12 +1161,14 @@ def swap_activity(
             raise HTTPException(status_code=404, detail="Therapist activity not found")
         
         # Create a real Activity from the therapist suggestion
+        # BUG FIX: Include user_hash when creating activity
         tags = ["+ TherapistSuggested"]
         if ta.category:
             tags.append(ta.category)
         
         now = datetime.utcnow()
         new_activity = models.Activities(
+            user_hash=payload.user_hash,  # BUG FIX: Scope to this user
             title=ta.title,
             description=ta.description or "",  # FIX: Ensure description is never None
             life_area=ta.category or "General",
