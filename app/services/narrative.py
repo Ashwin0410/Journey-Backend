@@ -390,7 +390,7 @@ def _build_hero_narrative(
 
 
 # =============================================================================
-# BUG FIX: _pick_recommended_activity now filters by user_hash
+# BUG FIX (Change 7): _pick_recommended_activity now filters by user_hash
 # =============================================================================
 
 def _pick_recommended_activity(
@@ -400,7 +400,7 @@ def _pick_recommended_activity(
     """
     Pick a recommended activity for the user.
     
-    BUG FIX: Now filters by user_hash to return only the user's own activities,
+    BUG FIX (Change 7): Now filters by user_hash to return only the user's own activities,
     preventing cross-user data pollution where Patient B would see Patient A's activities.
     
     Args:
@@ -477,7 +477,7 @@ def build_today_summary(db: Session, user: models.Users) -> schemas.TodaySummary
     """
     Build the today summary for a user.
     
-    BUG FIX: Now passes user_hash to _pick_recommended_activity to ensure
+    BUG FIX (Change 7): Now passes user_hash to _pick_recommended_activity to ensure
     the user only sees their own personalized activities.
     """
     now = datetime.utcnow()
@@ -504,7 +504,7 @@ def build_today_summary(db: Session, user: models.Users) -> schemas.TodaySummary
     cooldown_remaining = int(j_state.get("cooldown_minutes_remaining", 0))
 
     
-    # BUG FIX: Pass user_hash to get user-specific activity
+    # BUG FIX (Change 7): Pass user_hash to get user-specific activity
     rec_act = _pick_recommended_activity(db, user.user_hash)
 
 
@@ -525,7 +525,7 @@ def build_today_summary(db: Session, user: models.Users) -> schemas.TodaySummary
 
 
 # =============================================================================
-# CHANGE #1: Pre-generation functions for Day 2+ audio
+# CHANGE #8: Pre-generation functions for Day 2+ audio
 # =============================================================================
 
 
