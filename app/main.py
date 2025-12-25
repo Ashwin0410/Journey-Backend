@@ -97,6 +97,10 @@ from app.routes.therapist_activities import r as therapist_activities_r
 from app.routes.therapist_resources import r as therapist_resources_r
 # Push Notifications (CHANGE #7)
 from app.routes.notifications import r as notifications_r
+# CHANGE #10: Admin Console Routes
+from app.routes.admin_auth import r as admin_auth_r
+from app.routes.admin_dashboard import r as admin_dashboard_r
+
 app.include_router(health_r)
 app.include_router(journey_r)
 app.include_router(feedback_r)
@@ -119,3 +123,6 @@ app.include_router(therapist_activities_r)
 app.include_router(therapist_resources_r)
 # Push Notifications Router (CHANGE #7)
 app.include_router(notifications_r)
+# CHANGE #10: Admin Console Routers
+app.include_router(admin_auth_r)
+app.include_router(admin_dashboard_r)
