@@ -6,12 +6,20 @@ from sqlalchemy.orm import Session
 from app.core.config import cfg as c
 from app.db import SessionLocal
 from app import models
+
+# CHANGE #10: Admin credentials (in production, use environment variables)
+ADMIN_USERNAME = "admin"
+ADMIN_PASSWORD_HASH = "$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4.HGTvFJ.xQ.IkWS"  # "rewire_admin_2024"
+
+
 def get_db():
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
+
+
 def create_access_token(
     data: dict,
     expires_delta: Optional[timedelta] = None,
@@ -21,6 +29,8 @@ def create_access_token(
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, c.JWT_SECRET_KEY, algorithm=c.JWT_ALGORITHM)
     return encoded_jwt
+
+
 def get_current_user(
     authorization: str | None = Header(None, alias="Authorization"),
     db: Session = Depends(get_db),
@@ -199,3 +209,109 @@ def get_patient_by_id(
         )
     
     return patient
+
+
+# =============================================================================
+# CHANGE #10: ADMIN AUTHENTICATION UTILITIES
+# =============================================================================
+
+
+def create_admin_access_token(
+    data: dict,
+    expires_delta: Optional[timedelta] = None,
+) -> str:
+    """
+    Create JWT access token for admin.
+    Adds 'role': 'admin' to distinguish from patient/therapist tokens.
+    Default expiry is 24 hours for admin tokens (shorter for security).
+    """
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta or timedelta(hours=24))
+    to_encode.update({
+        "exp": expire,
+        "role": "admin",
+    })
+    encoded_jwt = jwt.encode(to_encode, c.JWT_SECRET_KEY, algorithm=c.JWT_ALGORITHM)
+    return encoded_jwt
+
+
+def verify_admin_password(password: str) -> bool:
+    """
+    Verify admin password against stored hash.
+    Uses bcrypt for secure password comparison.
+    """
+    try:
+        import bcrypt
+        return bcrypt.checkpw(
+            password.encode('utf-8'),
+            ADMIN_PASSWORD_HASH.encode('utf-8')
+        )
+    except Exception:
+        # Fallback: direct comparison (less secure, for development only)
+        # In production, always use bcrypt
+        return password == "rewire_admin_2024"
+
+
+def get_current_admin(
+    authorization: str | None = Header(None, alias="Authorization"),
+) -> dict:
+    """
+    Dependency to verify admin JWT token.
+    Returns admin info dict if valid.
+    Raises 401 if not authenticated or not an admin.
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+        )
+    
+    token = authorization.split(" ", 1)[1]
+    
+    try:
+        payload = jwt.decode(
+            token,
+            c.JWT_SECRET_KEY,
+            algorithms=[c.JWT_ALGORITHM],
+        )
+        
+        # Check that this is an admin token
+        role = payload.get("role")
+        if role != "admin":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Admin access required",
+            )
+        
+        username: str | None = payload.get("sub")
+        if username is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token",
+            )
+        
+        return {
+            "username": username,
+            "role": "admin",
+        }
+        
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+        )
+
+
+def require_admin(
+    admin: dict = Depends(get_current_admin),
+) -> dict:
+    """
+    Dependency that requires admin authentication.
+    Use this to protect admin-only endpoints.
+    
+    Usage:
+        @router.get("/admin/users")
+        def list_users(admin: dict = Depends(require_admin)):
+            ...
+    """
+    return admin
