@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from datetime import datetime
 from typing import Optional
 import threading
+import traceback
 
 from ..schemas import FeedbackIn
 from ..db import SessionLocal
@@ -20,7 +21,7 @@ def db():
 
 
 # =============================================================================
-# CHANGE #1: Pre-generate audio for Day 2+ users
+# CHANGE #8: Pre-generate audio for Day 2+ users
 # =============================================================================
 
 
@@ -57,6 +58,8 @@ def _trigger_pre_generation(
     try:
         next_journey_day = current_journey_day + 1
         
+        print(f"[feedback] Starting pre-generation for user {user_hash}, next day {next_journey_day}")
+        
         # Check if we already have pre-generated audio for this user's next day
         existing = (
             db_session.query(PreGeneratedAudio)
@@ -80,10 +83,11 @@ def _trigger_pre_generation(
         schema_hint = session.schema_hint if session else None
         
         # Create a pending pre-generation record
+        # NOTE: audio_path is set to a placeholder, will be updated when generation completes
         pre_gen = PreGeneratedAudio(
             user_hash=user_hash,
             for_journey_day=next_journey_day,
-            audio_path="",  # Will be filled when generation completes
+            audio_path="pending",  # Placeholder - will be updated after generation
             script_text=None,
             track_id=track_id,
             voice_id=voice_id,
@@ -106,6 +110,7 @@ def _trigger_pre_generation(
         
     except Exception as e:
         print(f"[feedback] Error in pre-generation trigger: {e}")
+        traceback.print_exc()
     finally:
         db_session.close()
 
@@ -137,20 +142,16 @@ def _generate_audio_for_record(pre_gen_id: int):
         print(f"[feedback] Starting audio generation for pre-gen id={pre_gen_id}, user={pre_gen.user_hash}, day={pre_gen.for_journey_day}")
         
         # Import narrative service for generation
-        from ..services import narrative as narrative_service
+        try:
+            from ..services import narrative as narrative_service
+        except ImportError as ie:
+            print(f"[feedback] Failed to import narrative service: {ie}")
+            pre_gen.status = "failed"
+            pre_gen.error_message = f"Import error: {str(ie)}"
+            db_session.commit()
+            return
         
         # Build context for generation using chills-based personalization
-        context = {
-            "user_hash": pre_gen.user_hash,
-            "journey_day": pre_gen.for_journey_day,
-            "mood": pre_gen.mood,
-            "schema_hint": pre_gen.schema_hint,
-            "emotion_word": pre_gen.emotion_word,
-            "chills_detail": pre_gen.chills_detail,
-            "session_insight": pre_gen.session_insight,
-        }
-        
-        # Generate the script using chills-based context
         chills_context = {
             "emotion_word": pre_gen.emotion_word,
             "chills_detail": pre_gen.chills_detail,
@@ -158,6 +159,8 @@ def _generate_audio_for_record(pre_gen_id: int):
             "feeling": pre_gen.mood,
             "schema_choice": pre_gen.schema_hint,
         }
+        
+        print(f"[feedback] Generating script with chills_context: {chills_context}")
         
         # Generate narrative script
         script_text = narrative_service.generate_narrative_script(
@@ -171,10 +174,12 @@ def _generate_audio_for_record(pre_gen_id: int):
         
         if not script_text:
             pre_gen.status = "failed"
-            pre_gen.error_message = "Failed to generate script"
+            pre_gen.error_message = "Failed to generate script - returned None/empty"
             db_session.commit()
             print(f"[feedback] Failed to generate script for pre-gen id={pre_gen_id}")
             return
+        
+        print(f"[feedback] Script generated, length: {len(script_text)} chars")
         
         pre_gen.script_text = script_text
         db_session.commit()
@@ -182,28 +187,38 @@ def _generate_audio_for_record(pre_gen_id: int):
         # Generate audio from script
         voice_id = pre_gen.voice_id or "default"
         
+        print(f"[feedback] Generating audio with voice_id: {voice_id}")
+        
         audio_result = narrative_service.generate_audio_from_script(
             script_text=script_text,
             voice_id=voice_id,
+            journey_day=pre_gen.for_journey_day,
         )
         
-        if not audio_result or not audio_result.get("audio_path"):
+        if not audio_result:
             pre_gen.status = "failed"
-            pre_gen.error_message = "Failed to generate audio"
+            pre_gen.error_message = "generate_audio_from_script returned None"
             db_session.commit()
-            print(f"[feedback] Failed to generate audio for pre-gen id={pre_gen_id}")
+            print(f"[feedback] Failed to generate audio for pre-gen id={pre_gen_id} - result is None")
+            return
+        
+        if not audio_result.get("audio_path"):
+            pre_gen.status = "failed"
+            pre_gen.error_message = f"No audio_path in result: {audio_result}"
+            db_session.commit()
+            print(f"[feedback] Failed to generate audio for pre-gen id={pre_gen_id} - no audio_path")
             return
         
         # Success - update record
         pre_gen.audio_path = audio_result["audio_path"]
         pre_gen.status = "ready"
-        pre_gen.updated_at = datetime.utcnow()
+        # Don't set updated_at manually - let SQLAlchemy's onupdate handle it
         db_session.commit()
         
-        print(f"[feedback] Successfully pre-generated audio for user {pre_gen.user_hash} day {pre_gen.for_journey_day}, path: {pre_gen.audio_path}")
+        print(f"[feedback] ✅ Successfully pre-generated audio for user {pre_gen.user_hash} day {pre_gen.for_journey_day}, path: {pre_gen.audio_path}")
         
         # =================================================================
-        # CHANGE #7: Send push notification that audio is ready
+        # OPTIONAL: Send push notification that audio is ready
         # =================================================================
         try:
             from ..services import push as push_service
@@ -219,12 +234,16 @@ def _generate_audio_for_record(pre_gen_id: int):
             else:
                 print(f"[feedback] No push subscriptions for user {pre_gen.user_hash}")
                 
+        except ImportError:
+            # Push service not available - that's OK
+            pass
         except Exception as push_error:
             # Don't fail if push notification fails
             print(f"[feedback] Error sending push notification: {push_error}")
         
     except Exception as e:
         print(f"[feedback] Error generating audio for pre-gen id={pre_gen_id}: {e}")
+        traceback.print_exc()
         try:
             pre_gen = db_session.query(PreGeneratedAudio).filter(PreGeneratedAudio.id == pre_gen_id).first()
             if pre_gen:
@@ -246,12 +265,14 @@ def _run_pre_generation_in_background(
     session_id: str,
 ):
     """Run pre-generation in a separate thread to not block the response."""
+    print(f"[feedback] Spawning background thread for pre-generation, user={user_hash}, day={current_journey_day}")
     thread = threading.Thread(
         target=_trigger_pre_generation,
         args=(user_hash, current_journey_day, emotion_word, chills_detail, session_insight, session_id),
         daemon=True,
     )
     thread.start()
+    print(f"[feedback] Background thread started")
 
 
 # =============================================================================
@@ -274,13 +295,17 @@ def submit(x: FeedbackIn, q: Session = Depends(db)):
     q.add(z)
     q.commit()
     
-    # CHANGE #1: Trigger pre-generation for Day 2+ users
+    print(f"[feedback] Saved feedback for session {x.session_id}")
+    
+    # CHANGE #8: Trigger pre-generation for Day 2+ users
     # Get user_hash from the session
     try:
         session = q.query(Sessions).filter(Sessions.id == x.session_id).first()
         if session and session.user_hash:
             user_hash = session.user_hash
             current_journey_day = _get_user_journey_day(q, user_hash)
+            
+            print(f"[feedback] User {user_hash} is on journey day {current_journey_day}")
             
             # Only pre-generate if user has completed at least day 1
             if current_journey_day and current_journey_day >= 1:
@@ -295,8 +320,13 @@ def submit(x: FeedbackIn, q: Session = Depends(db)):
                     session_insight=x.session_insight,
                     session_id=x.session_id,
                 )
+            else:
+                print(f"[feedback] Skipping pre-generation - journey_day is {current_journey_day}")
+        else:
+            print(f"[feedback] Skipping pre-generation - no session or user_hash found for {x.session_id}")
     except Exception as e:
         # Don't fail the feedback submission if pre-generation fails
         print(f"[feedback] Error triggering pre-generation: {e}")
+        traceback.print_exc()
     
     return {"ok": True}
