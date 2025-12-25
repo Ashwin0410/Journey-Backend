@@ -163,6 +163,9 @@ def _find_place_by_name(name: str, all_places: List[PlaceDetail]) -> Optional[Pl
     return None
 
 
+# =============================================================================
+# CHANGE 5: ALL ACTIVITIES ARE NOW PLACE-BASED
+# =============================================================================
 
 
 def _generate_activities_via_llm(
@@ -182,6 +185,9 @@ def _generate_activities_via_llm(
     life_area: Optional[str] = None,
     life_focus: Optional[str] = None,
     week_actions: Optional[List[str]] = None,
+    # CHANGE 2: Direct GPS coordinates for location refresh
+    gps_lat: Optional[float] = None,
+    gps_lng: Optional[float] = None,
 ) -> List[schemas.ActivityBase]:
 
     context_bits: List[str] = []
@@ -223,14 +229,23 @@ def _generate_activities_via_llm(
     nearby_theatres: List[PlaceDetail] = []
     nearby_libraries: List[PlaceDetail] = []
     nearby_gyms: List[PlaceDetail] = []
+    nearby_restaurants: List[PlaceDetail] = []
+    nearby_museums: List[PlaceDetail] = []
+    nearby_spas: List[PlaceDetail] = []
 
     coords: Optional[Tuple[float, float]] = None
-    if postal_code:
+    
+    # CHANGE 2: Prefer direct GPS coordinates over postal code geocoding
+    if gps_lat is not None and gps_lng is not None:
+        coords = (gps_lat, gps_lng)
+        print(f"[activity] Using direct GPS coordinates: {coords}")
+    elif postal_code:
         coords = _geocode_postal_code(postal_code)
 
     if coords:
         lat, lng = coords
 
+        # CHANGE 5: Fetch more place types to ensure ALL activities can be place-based
         nearby_parks = _nearby_places(lat, lng, "park", max_results=5)
         nearby_cafes = _nearby_places(lat, lng, "cafe", max_results=5)
         nearby_attractions = _nearby_places(lat, lng, "tourist_attraction", max_results=5)
@@ -238,6 +253,9 @@ def _generate_activities_via_llm(
         nearby_theatres = _nearby_places(lat, lng, "movie_theater", max_results=5)
         nearby_libraries = _nearby_places(lat, lng, "library", max_results=5)
         nearby_gyms = _nearby_places(lat, lng, "gym", max_results=5)
+        nearby_restaurants = _nearby_places(lat, lng, "restaurant", max_results=5)
+        nearby_museums = _nearby_places(lat, lng, "museum", max_results=5)
+        nearby_spas = _nearby_places(lat, lng, "spa", max_results=5)
 
         # Extract names for LLM prompt
         park_names = _get_place_names(nearby_parks)
@@ -247,6 +265,9 @@ def _generate_activities_via_llm(
         theatre_names = _get_place_names(nearby_theatres)
         library_names = _get_place_names(nearby_libraries)
         gym_names = _get_place_names(nearby_gyms)
+        restaurant_names = _get_place_names(nearby_restaurants)
+        museum_names = _get_place_names(nearby_museums)
+        spa_names = _get_place_names(nearby_spas)
 
         if park_names:
             context_bits.append("nearby_parks: " + ", ".join(park_names))
@@ -262,6 +283,12 @@ def _generate_activities_via_llm(
             context_bits.append("nearby_libraries: " + ", ".join(library_names))
         if gym_names:
             context_bits.append("nearby_gyms: " + ", ".join(gym_names))
+        if restaurant_names:
+            context_bits.append("nearby_restaurants: " + ", ".join(restaurant_names))
+        if museum_names:
+            context_bits.append("nearby_museums: " + ", ".join(museum_names))
+        if spa_names:
+            context_bits.append("nearby_spas: " + ", ".join(spa_names))
 
     # Combine all places for coordinate lookup later
     all_nearby_places: List[PlaceDetail] = (
@@ -272,12 +299,16 @@ def _generate_activities_via_llm(
         + nearby_theatres
         + nearby_libraries
         + nearby_gyms
+        + nearby_restaurants
+        + nearby_museums
+        + nearby_spas
     )
 
     print(
         f"[activity] nearby counts – parks={len(nearby_parks)}, cafes={len(nearby_cafes)}, "
         f"attractions={len(nearby_attractions)}, malls={len(nearby_malls)}, "
-        f"theatres={len(nearby_theatres)}, libraries={len(nearby_libraries)}, gyms={len(nearby_gyms)}"
+        f"theatres={len(nearby_theatres)}, libraries={len(nearby_libraries)}, gyms={len(nearby_gyms)}, "
+        f"restaurants={len(nearby_restaurants)}, museums={len(nearby_museums)}, spas={len(nearby_spas)}"
     )
 
     context_text = "; ".join(context_bits) or "no extra context provided"
@@ -324,9 +355,12 @@ def _generate_activities_via_llm(
                 weekly_plan_hint += f"  • {action}\n"
         weekly_plan_hint += (
             "Generate activities that align with these commitments. "
-            "The GOAL-BASED activities (4-6) should especially reflect their weekly plan.\n"
+            "ALL activities should be at real nearby places that support their goals.\n"
         )
 
+    # =============================================================================
+    # CHANGE 5: Updated system message - ALL 6 activities must be PLACE-BASED
+    # =============================================================================
     system_msg = (
         "You are a behavioural activation coach designing very small, realistic, "
         "real-world activities for a mental health app.\n"
@@ -334,42 +368,44 @@ def _generate_activities_via_llm(
         "- concrete and doable in 5–30 minutes\n"
         "- safe and gentle (no extreme exercise, no unsafe locations)\n"
         "- described in simple language\n"
-        "- If you reference a place (park, cafe, mall, theatre, library, attraction, gym), "
-        "you MUST use the exact name from the provided nearby_* lists.\n"
-        "- Do NOT invent or tweak place names.\n\n"
-        "MATCH PLACE TYPE TO THE USER'S GOAL:\n"
-        "- Goals about movement / steps / walk / exercise -> prefer parks or gyms.\n"
-        "- Goals about talking, connection, not feeling alone -> prefer cafes or other social spaces.\n"
-        "- Goals about chilling, recharging, entertainment -> prefer malls, theatres, or gentle attractions.\n"
-        "- Goals about focus, work, study, reading -> prefer libraries or quiet cafes.\n"
-        "Where possible, vary the place types across the 3 place-based activities.\n\n"
-        "You can use BA flavours like Movement, Connection, Creative, Grounding, "
-        "or Self-compassion. Use tags to encode this.\n"
+        "- AT A REAL NEARBY PLACE from the provided lists\n\n"
+        "CRITICAL: ALL 6 activities MUST use a real place from the nearby_* lists.\n"
+        "You MUST use the exact name from the provided nearby_* lists.\n"
+        "Do NOT invent or tweak place names.\n"
+        "Do NOT suggest 'at home' or 'anywhere comfortable' - every activity needs a real location.\n\n"
+        "MATCH PLACE TYPE TO THE ACTIVITY GOAL:\n"
+        "- Movement / steps / walk / exercise -> prefer parks or gyms\n"
+        "- Connection / talking / social -> prefer cafes or restaurants\n"
+        "- Relaxation / recharging / entertainment -> prefer malls, theatres, spas, or attractions\n"
+        "- Focus / work / study / reading -> prefer libraries or quiet cafes\n"
+        "- Culture / inspiration / learning -> prefer museums or attractions\n"
+        "- Self-care / wellness -> prefer spas, gyms, or parks\n\n"
+        "Vary the place types across all 6 activities for diversity.\n"
+        "Use BA flavours like Movement, Connection, Creative, Grounding, or Self-compassion.\n"
         f"{chills_hint}"
         f"{weekly_plan_hint}"
     )
 
+    # =============================================================================
+    # CHANGE 5: Updated user message - ALL 6 activities are PLACE-BASED
+    # =============================================================================
     user_msg = (
         f"User context: {context_text}\n\n"
-        "Generate EXACTLY 6 activities in this order:\n"
-        "1–3: PLACE-BASED activities that use real nearby places from the lists. "
-        "Mark them with a '+ PlaceBased' tag.\n"
-        "4–6: GOAL-BASED BA activities (like 'Coffee with Maya', 'Call Mom', "
-        "'Morning Pages'). Mark them with a '+ GoalBased' tag.\n\n"
-        "For GOAL-BASED items, also include a tag of the form "
-        "'Supports: <short phrase>' explaining how it supports their goal.\n\n"
+        "Generate EXACTLY 6 PLACE-BASED activities.\n"
+        "EVERY activity MUST be at a real nearby place from the lists provided.\n"
+        "Use different place types across the 6 activities for variety.\n\n"
         "Return ONLY JSON in this exact format (no extra commentary):\n"
         "{\n"
         '  \"activities\": [\n'
         "    {\n"
         '      \"title\": \"short name\",\n'
-        '      \"description\": \"2–3 sentence description of what to do\",\n'
+        '      \"description\": \"2–3 sentence description of what to do at this specific place\",\n'
         '      \"life_area\": \"Movement | Connection | Creative | Grounding | Self-compassion | Work | Body\",\n'
         '      \"effort_level\": \"low | medium | high\",\n'
         '      \"reward_type\": \"calm | connection | mastery | movement | other\",\n'
         '      \"default_duration_min\": 5,\n'
-        '      \"location_label\": \"Exact place name from nearby lists, or \'at home\' / \'anywhere comfortable\' for goal-based items\",\n'
-        '      \"tags\": [\"+ PlaceBased or + GoalBased\", \"BA flavour like Movement/Connection\", \"Supports: ... for goal-based\"]\n'
+        '      \"location_label\": \"EXACT place name from nearby lists - REQUIRED\",\n'
+        '      \"tags\": [\"+ PlaceBased\", \"BA flavour like Movement/Connection\"]\n'
         "    }\n"
         "  ]\n"
         "}"
@@ -400,13 +436,11 @@ def _generate_activities_via_llm(
     if len(items) > count:
         items = items[:count]
 
-    # tag enforcement: first 3 = PlaceBased, last 3 = GoalBased
+    # CHANGE 5: All activities are now PlaceBased - enforce tag on all
     for idx, item in enumerate(items):
         tags = item.get("tags") or []
-        if idx < 3 and not any("+ PlaceBased" in str(t) for t in tags):
+        if not any("+ PlaceBased" in str(t) for t in tags):
             tags.append("+ PlaceBased")
-        if idx >= 3 and not any("+ GoalBased" in str(t) for t in tags):
-            tags.append("+ GoalBased")
         item["tags"] = tags
 
     activities: List[schemas.ActivityBase] = []
@@ -422,8 +456,11 @@ def _generate_activities_via_llm(
             tags = item.get("tags") or []
             location_label = item.get("location_label")
 
-            if not location_label:
-                location_label = "at home"
+            # CHANGE 5: Default to first available place if no location specified
+            if not location_label and all_nearby_places:
+                location_label = all_nearby_places[0]["name"]
+            elif not location_label:
+                location_label = "nearby location"
 
             # Try to find coordinates for this location
             lat: Optional[float] = None
@@ -462,7 +499,7 @@ def _generate_activities_via_llm(
 
 
 # =============================================================================
-# BUG FIX: Store generated activities with user_hash for per-user scoping
+# BUG FIX (Change 7): Store generated activities with user_hash for per-user scoping
 # =============================================================================
 
 
@@ -475,7 +512,7 @@ def _store_generated_activities(
     """
     Store generated activities in the database.
     
-    BUG FIX: Now accepts user_hash to scope activities to individual users.
+    BUG FIX (Change 7): Now accepts user_hash to scope activities to individual users.
     Without this, activities were stored globally and shared across all users.
     """
     now = datetime.utcnow()
@@ -793,7 +830,7 @@ def commit_activity(
             raise HTTPException(status_code=404, detail="Therapist activity not found")
         
         # Create a real Activity from the therapist suggestion for this commit
-        # BUG FIX: Include user_hash when creating activity from therapist suggestion
+        # BUG FIX (Change 7): Include user_hash when creating activity from therapist suggestion
         tags = ["+ TherapistSuggested"]
         if ta.category:
             tags.append(ta.category)
@@ -834,6 +871,10 @@ def commit_activity(
     return {"ok": True}
 
 
+# =============================================================================
+# CHANGE 2: Added gps_lat and gps_lng parameters for location refresh
+# =============================================================================
+
 @r.get(
     "/recommendation",
     response_model=schemas.ActivityRecommendationListOut,
@@ -853,6 +894,9 @@ def get_recommendation(
     postal_code: Optional[str] = Query(None, description="Location text (postcode, city, etc.)"),
     goal_today: Optional[str] = Query(None, description="User's stated goal for today"),
     place: Optional[str] = Query(None, description="Environment: indoors / outdoors / nature etc."),
+    # CHANGE 2: New GPS coordinate parameters for location refresh
+    gps_lat: Optional[float] = Query(None, description="GPS latitude for location-based refresh"),
+    gps_lng: Optional[float] = Query(None, description="GPS longitude for location-based refresh"),
     limit: int = Query(6, ge=1, le=20, description="Maximum number of activities to return"),
     commit_first: bool = Query(False, description="If true (and user_hash present), persist the top pick"),
     db: Session = Depends(get_db),
@@ -889,7 +933,7 @@ def get_recommendation(
         intake_life_focus = fb.get("life_focus")
         week_actions = fb.get("week_actions", [])
 
-    print(f"[activity] /recommendation called with postal_code='{postal_code}', user_hash='{user_hash}', life_area='{intake_life_area}', life_focus='{intake_life_focus}'")
+    print(f"[activity] /recommendation called with postal_code='{postal_code}', user_hash='{user_hash}', life_area='{intake_life_area}', life_focus='{intake_life_focus}', gps_lat={gps_lat}, gps_lng={gps_lng}")
 
     generated = _generate_activities_via_llm(
         mood=mood,
@@ -907,9 +951,12 @@ def get_recommendation(
         life_area=intake_life_area,
         life_focus=intake_life_focus,
         week_actions=week_actions,
+        # CHANGE 2: Pass GPS coordinates for location refresh
+        gps_lat=gps_lat,
+        gps_lng=gps_lng,
     )
 
-    # BUG FIX: Pass user_hash when storing activities
+    # BUG FIX (Change 7): Pass user_hash when storing activities
     rows = _store_generated_activities(db, activities=generated, user_hash=user_hash)
 
     # CHANGE #4: Get therapist-suggested activities for THIS SPECIFIC PATIENT ONLY
@@ -962,7 +1009,7 @@ def get_recommendation(
 
 
 # =============================================================================
-# BUG FIX: Activity library now filters by user_hash
+# BUG FIX (Change 7): Activity library now filters by user_hash
 # =============================================================================
 
 @r.get(
@@ -983,12 +1030,12 @@ def get_library(
     """
     Return the latest 6 active activities for the user plus any therapist-suggested activities.
     
-    BUG FIX: Now filters activities by user_hash to prevent cross-user data pollution.
+    BUG FIX (Change 7): Now filters activities by user_hash to prevent cross-user data pollution.
     Previously, all activities were returned globally regardless of which user created them.
     
     CHANGE #4: Therapist activities are now patient-specific and not converted to global Activities.
     """
-    # BUG FIX: Build query with user_hash filter
+    # BUG FIX (Change 7): Build query with user_hash filter
     query = db.query(models.Activities).filter(models.Activities.is_active == True)
     
     if user_hash:
@@ -1089,7 +1136,7 @@ def start_activity(
             raise HTTPException(status_code=404, detail="Therapist activity not found")
         
         # Create a real Activity from the therapist suggestion
-        # BUG FIX: Include user_hash when creating activity
+        # BUG FIX (Change 7): Include user_hash when creating activity
         tags = ["+ TherapistSuggested"]
         if ta.category:
             tags.append(ta.category)
@@ -1170,7 +1217,7 @@ def complete_activity(
                 .filter(
                     models.Activities.title == ta.title,
                     models.Activities.description == ta.description,
-                    models.Activities.user_hash == payload.user_hash,  # BUG FIX: Filter by user
+                    models.Activities.user_hash == payload.user_hash,  # BUG FIX (Change 7): Filter by user
                     models.Activities.is_active == True,
                 )
                 .order_by(models.Activities.created_at.desc())
@@ -1225,7 +1272,7 @@ def swap_activity(
             raise HTTPException(status_code=404, detail="Therapist activity not found")
         
         # Create a real Activity from the therapist suggestion
-        # BUG FIX: Include user_hash when creating activity
+        # BUG FIX (Change 7): Include user_hash when creating activity
         tags = ["+ TherapistSuggested"]
         if ta.category:
             tags.append(ta.category)
