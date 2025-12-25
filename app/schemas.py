@@ -63,7 +63,8 @@ class JourneyEventIn(BaseModel):
 
 
 # =============================================================================
-# ACTIVITY SCHEMAS - BUG FIX: Added user_hash for per-user activity scoping
+# ACTIVITY SCHEMAS - BUG FIX (Change 7): Added user_hash for per-user activity scoping
+# CHANGE 5: All activities are now place-based with location fields
 # =============================================================================
 
 class ActivityBase(BaseModel):
@@ -75,9 +76,9 @@ class ActivityBase(BaseModel):
     default_duration_min: int | None = None
     location_label: str | None = None
     tags: List[str] | None = None
-    # BUG FIX: Added user_hash to scope activities to individual users
+    # BUG FIX (Change 7): Added user_hash to scope activities to individual users
     user_hash: str | None = None
-    # Google Maps coordinates for directions
+    # CHANGE 5: Google Maps coordinates for directions - ALL activities are place-based
     lat: float | None = None
     lng: float | None = None
     place_id: str | None = None
@@ -85,7 +86,7 @@ class ActivityBase(BaseModel):
 
 class ActivityOut(ActivityBase):
     id: int
-    # BUG FIX: Include user_hash in output for verification
+    # BUG FIX (Change 7): Include user_hash in output for verification
     user_hash: str | None = None
 
     class Config:
@@ -96,6 +97,7 @@ class ActivityRecommendationOut(ActivityOut):
     """
     Extended activity output for recommendations.
     Inherits user_hash from ActivityOut.
+    CHANGE 5: All activities now include location data (lat, lng, place_id).
     """
     pass
 
@@ -746,3 +748,175 @@ class ResourceSectionOut(BaseModel):
 class ResourceListOut(BaseModel):
     """Full resource library."""
     sections: List[ResourceSectionOut]
+
+
+# ============================================================================
+# ADMIN CONSOLE SCHEMAS (Change 10)
+# ============================================================================
+
+
+# --- Admin Auth Schemas ---
+
+class AdminRegisterIn(BaseModel):
+    """Schema for admin registration (typically done by superadmin)."""
+    name: str
+    email: str
+    password: str
+    role: str = "admin"  # admin, superadmin, moderator
+
+
+class AdminLoginIn(BaseModel):
+    """Schema for admin login."""
+    email: str
+    password: str
+
+
+class AdminOut(BaseModel):
+    """Schema for admin data output."""
+    id: int
+    admin_hash: str
+    email: str
+    name: Optional[str] = None
+    role: str
+    is_active: bool
+    last_login_at: Optional[datetime] = None
+    created_at: datetime
+
+    class Config:
+        orm_mode = True
+
+
+class AdminTokenOut(BaseModel):
+    """Schema for admin auth token response."""
+    access_token: str
+    token_type: str = "bearer"
+    admin: AdminOut
+
+
+# --- Admin User Management Schemas ---
+
+class AdminUserListItemOut(BaseModel):
+    """Schema for user item in admin list view."""
+    id: int
+    user_hash: str
+    email: str
+    name: Optional[str] = None
+    provider: str
+    journey_day: Optional[int] = None
+    onboarding_complete: bool
+    safety_flag: Optional[int] = None
+    created_at: datetime
+    last_journey_date: Optional[date] = None
+    
+    # Computed fields
+    total_sessions: int = 0
+    total_activities: int = 0
+    has_therapist: bool = False
+
+    class Config:
+        orm_mode = True
+
+
+class AdminUserListOut(BaseModel):
+    """Schema for paginated user list in admin console."""
+    users: List[AdminUserListItemOut]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+
+
+class AdminTherapistListItemOut(BaseModel):
+    """Schema for therapist item in admin list view."""
+    id: int
+    therapist_hash: str
+    email: str
+    name: Optional[str] = None
+    title: Optional[str] = None
+    specialty: Optional[str] = None
+    is_active: bool
+    created_at: datetime
+    
+    # Computed fields
+    patient_count: int = 0
+
+    class Config:
+        orm_mode = True
+
+
+class AdminTherapistListOut(BaseModel):
+    """Schema for paginated therapist list in admin console."""
+    therapists: List[AdminTherapistListItemOut]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+
+
+# --- Admin Actions Schemas ---
+
+class AdminDeleteUserIn(BaseModel):
+    """Schema for deleting a user account."""
+    user_id: int
+    reason: Optional[str] = None  # Optional reason for audit log
+    hard_delete: bool = True  # If true, fully delete (allows re-registration with same email)
+
+
+class AdminDeleteTherapistIn(BaseModel):
+    """Schema for deleting a therapist account."""
+    therapist_id: int
+    reason: Optional[str] = None  # Optional reason for audit log
+    hard_delete: bool = True  # If true, fully delete (allows re-registration with same email)
+
+
+class AdminActionResultOut(BaseModel):
+    """Schema for admin action result."""
+    success: bool
+    message: str
+    action: str
+    target_type: str  # "user", "therapist", "admin"
+    target_id: int
+    target_email: Optional[str] = None
+
+
+# --- Admin Dashboard Stats Schemas ---
+
+class AdminDashboardStatsOut(BaseModel):
+    """Schema for admin dashboard statistics."""
+    total_users: int
+    total_therapists: int
+    total_admins: int
+    active_users_today: int
+    active_users_week: int
+    new_users_today: int
+    new_users_week: int
+    total_sessions: int
+    total_activities_completed: int
+
+
+# --- Admin Audit Log Schemas ---
+
+class AdminAuditLogOut(BaseModel):
+    """Schema for audit log entry output."""
+    id: int
+    admin_id: Optional[int] = None
+    admin_email: Optional[str] = None  # Denormalized for display
+    action: str
+    target_type: Optional[str] = None
+    target_id: Optional[int] = None
+    target_email: Optional[str] = None
+    details: Optional[Dict[str, Any]] = None
+    ip_address: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        orm_mode = True
+
+
+class AdminAuditLogListOut(BaseModel):
+    """Schema for paginated audit log list."""
+    logs: List[AdminAuditLogOut]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
