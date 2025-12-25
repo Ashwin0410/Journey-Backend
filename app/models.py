@@ -77,7 +77,7 @@ class Activities(Base):
     __tablename__ = "activities"
     id = Column(Integer, primary_key=True, index=True)
     
-    # BUG FIX: Added user_hash to scope activities to individual users
+    # BUG FIX (Change 7): Added user_hash to scope activities to individual users
     # Without this, activities generated during intake were shared globally
     # causing Patient B to see Patient A's personalized activities
     user_hash = Column(String, index=True, nullable=True)
@@ -558,5 +558,82 @@ class PatientInvites(Base):
     # Expiration
     expires_at = Column(DateTime(timezone=True), nullable=True)
     accepted_at = Column(DateTime(timezone=True), nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+# =============================================================================
+# ADMIN CONSOLE MODEL (Change 10)
+# =============================================================================
+
+
+class Admins(Base):
+    """
+    Admin user accounts for managing all accounts in the system.
+    
+    Change 10: Admins can view and delete both therapist and patient accounts.
+    When an account is deleted, the email becomes available for re-registration.
+    """
+    __tablename__ = "admins"
+
+    id = Column(Integer, primary_key=True, index=True)
+    admin_hash = Column(String, unique=True, index=True, nullable=False)
+
+    email = Column(String, unique=True, index=True, nullable=False)
+    name = Column(String, nullable=True)
+    
+    # Password hash for authentication
+    password_hash = Column(String, nullable=False)
+    
+    # Role: superadmin, admin, moderator (for future role-based access)
+    role = Column(String, default="admin", index=True)
+    
+    # Permissions stored as JSON (for granular control)
+    # e.g., {"can_delete_users": true, "can_delete_therapists": true, "can_view_analytics": true}
+    permissions_json = Column(Text, nullable=True)
+    
+    # Account status
+    is_active = Column(Boolean, default=True, nullable=False)
+    
+    # Last login tracking
+    last_login_at = Column(DateTime(timezone=True), nullable=True)
+    last_login_ip = Column(String, nullable=True)
+    
+    # Audit trail
+    created_by_admin_id = Column(Integer, nullable=True)  # Which admin created this admin
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class AdminAuditLog(Base):
+    """
+    Audit log for admin actions.
+    
+    Change 10: Tracks all admin actions for accountability and security.
+    """
+    __tablename__ = "admin_audit_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    admin_id = Column(
+        Integer,
+        ForeignKey("admins.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,  # Allow null if admin is deleted
+    )
+    
+    # Action details
+    action = Column(String, nullable=False, index=True)  # e.g., "delete_user", "delete_therapist", "view_users"
+    target_type = Column(String, nullable=True, index=True)  # "user", "therapist", "admin"
+    target_id = Column(Integer, nullable=True)  # ID of the affected record
+    target_email = Column(String, nullable=True)  # Email for reference after deletion
+    
+    # Additional context stored as JSON
+    # e.g., {"reason": "User requested deletion", "user_name": "John Doe"}
+    details_json = Column(Text, nullable=True)
+    
+    # Request metadata
+    ip_address = Column(String, nullable=True)
+    user_agent = Column(String, nullable=True)
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
