@@ -4,12 +4,11 @@
 Admin authentication endpoints for the ReWire Admin Console.
 Provides login, logout, and session verification for admin users.
 """
-
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
 from sqlalchemy.orm import Session
-
 from ..auth_utils import (
     get_db,
     create_admin_access_token,
@@ -19,14 +18,12 @@ from ..auth_utils import (
     ADMIN_USERNAME,
 )
 
-
 r = APIRouter(prefix="/api/admin", tags=["admin-auth"])
 
 
 # =============================================================================
 # REQUEST/RESPONSE SCHEMAS
 # =============================================================================
-
 
 class AdminLoginRequest(BaseModel):
     username: str
@@ -54,8 +51,7 @@ class AdminLogoutResponse(BaseModel):
 # ENDPOINTS
 # =============================================================================
 
-
-@r.post("/login", response_model=AdminLoginResponse)
+@r.post("/login")
 def admin_login(request: AdminLoginRequest):
     """
     Admin login endpoint.
@@ -63,26 +59,37 @@ def admin_login(request: AdminLoginRequest):
     """
     # Validate username
     if request.username != ADMIN_USERNAME:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid username or password",
+        return JSONResponse(
+            status_code=401,
+            content={"success": False, "message": "Invalid username or password"}
         )
     
     # Validate password
     if not verify_admin_password(request.password):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid username or password",
+        return JSONResponse(
+            status_code=401,
+            content={"success": False, "message": "Invalid username or password"}
         )
     
     # Create admin token
-    token = create_admin_access_token(data={"sub": request.username})
+    try:
+        token = create_admin_access_token(data={"sub": request.username})
+    except Exception as e:
+        print(f"[admin_auth] Token creation failed: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": f"Token creation failed: {str(e)}"}
+        )
     
-    return AdminLoginResponse(
-        success=True,
-        token=token,
-        username=request.username,
-        message="Login successful",
+    # Return success response
+    return JSONResponse(
+        status_code=200,
+        content={
+            "success": True,
+            "token": token,
+            "username": request.username,
+            "message": "Login successful"
+        }
     )
 
 
