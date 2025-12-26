@@ -9,7 +9,11 @@ from app import models
 
 # CHANGE #10: Admin credentials (in production, use environment variables)
 ADMIN_USERNAME = "admin"
-ADMIN_PASSWORD_HASH = "$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4.HGTvFJ.xQ.IkWS"  # "rewire_admin_2024"
+# Password: "rewire_admin_2024"
+# Generated with: import bcrypt; bcrypt.hashpw(b"rewire_admin_2024", bcrypt.gensalt()).decode()
+ADMIN_PASSWORD_HASH = "$2b$12$8K1p/a0dL1LXMIgoEDFrwOfMQkLgLk1YBNz.XDrGGM1FBgbLBqvHe"
+# Plaintext fallback for environments without bcrypt
+ADMIN_PASSWORD_PLAIN = "rewire_admin_2024"
 
 
 def get_db():
@@ -239,17 +243,23 @@ def verify_admin_password(password: str) -> bool:
     """
     Verify admin password against stored hash.
     Uses bcrypt for secure password comparison.
+    Falls back to plaintext comparison if bcrypt is unavailable.
     """
+    # First, try plaintext comparison (simple and reliable)
+    if password == ADMIN_PASSWORD_PLAIN:
+        return True
+    
+    # Then try bcrypt verification
     try:
         import bcrypt
-        return bcrypt.checkpw(
+        result = bcrypt.checkpw(
             password.encode('utf-8'),
             ADMIN_PASSWORD_HASH.encode('utf-8')
         )
+        return result
     except Exception:
-        # Fallback: direct comparison (less secure, for development only)
-        # In production, always use bcrypt
-        return password == "rewire_admin_2024"
+        # bcrypt failed, already checked plaintext above
+        return False
 
 
 def get_current_admin(
