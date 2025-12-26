@@ -360,6 +360,149 @@ def _use_pre_generated_audio(
     )
 
 
+# =============================================================================
+# FIX: Pre-gen status endpoint for instant playback (frontend checks this first)
+# =============================================================================
+
+
+@r.get("/api/journey/pre-gen-status")
+def get_pre_gen_status(
+    user_hash: str = Query(..., description="User hash to check pre-generated audio for"),
+    q: Session = Depends(db),
+):
+    """
+    Quick check if pre-generated audio exists for the user's current journey day.
+    
+    This endpoint is called by the frontend BEFORE showing any loading screen.
+    If pre-gen exists, the frontend can skip the loader and go straight to the player.
+    
+    Returns:
+        - has_pre_gen: bool - whether pre-generated audio is available
+        - audio_url: str | None - the audio URL if available
+        - session_id: str | None - a new session ID if pre-gen is available
+        - duration_ms: int | None - audio duration if available
+        - journey_day: int | None - the journey day this audio is for
+    """
+    c = cfg
+    
+    # Get user's current journey day
+    try:
+        user = q.query(Users).filter(Users.user_hash == user_hash).first()
+        if not user:
+            return {
+                "has_pre_gen": False,
+                "audio_url": None,
+                "session_id": None,
+                "duration_ms": None,
+                "journey_day": None,
+            }
+        
+        journey_day = getattr(user, "journey_day", None) or 1
+        
+        # Day 1 uses static audio - return it directly
+        if journey_day == 1:
+            static_audio_url = f"/assets/{DAY1_STATIC_AUDIO_FILENAME}"
+            return {
+                "has_pre_gen": True,
+                "audio_url": static_audio_url,
+                "session_id": f"day1_static_{int(datetime.utcnow().timestamp())}",
+                "duration_ms": 720000,  # 12 minutes
+                "journey_day": 1,
+                "title": "Your First Journey",
+                "subtitle": "Welcome to ReWire",
+                "session_number": 1,
+            }
+        
+        # Day 2+: Check for pre-generated audio
+        pre_gen = _check_pre_generated_audio(q, user_hash, journey_day)
+        
+        if not pre_gen:
+            return {
+                "has_pre_gen": False,
+                "audio_url": None,
+                "session_id": None,
+                "duration_ms": None,
+                "journey_day": journey_day,
+            }
+        
+        # Pre-gen exists! Build the response
+        audio_path = pre_gen.audio_path
+        
+        # Determine if it's a full path or just a filename
+        if os.path.isabs(audio_path) or audio_path.startswith(c.OUT_DIR):
+            audio_filename = Path(audio_path).name
+        else:
+            audio_filename = audio_path
+        
+        public_url = st.public_url(c.PUBLIC_BASE_URL, audio_filename)
+        
+        # Try to get duration
+        duration_ms_val = 600000  # Default 10 minutes
+        try:
+            full_audio_path = os.path.join(c.OUT_DIR, audio_filename) if not os.path.isabs(audio_path) else audio_path
+            if os.path.exists(full_audio_path):
+                duration_ms_val = duration_ms(load_audio(full_audio_path))
+        except Exception:
+            pass
+        
+        # Generate a session ID for this pre-gen
+        # Note: We don't create the session record here - that happens when /generate is called
+        # This is just a status check
+        
+        # Actually, to make this truly instant, we should create the session here
+        # and return all the data needed for the player
+        session_id = sid()
+        
+        # Create session record
+        row = Sessions(
+            id=session_id,
+            user_hash=user_hash,
+            track_id=pre_gen.track_id or "pre_generated",
+            voice_id=pre_gen.voice_id or "default",
+            audio_path=audio_filename,
+            mood=pre_gen.mood,
+            schema_hint=pre_gen.schema_hint,
+        )
+        q.add(row)
+        
+        # Add script record
+        script_text = pre_gen.script_text or ""
+        if script_text:
+            q.add(Scripts(session_id=session_id, script_text=script_text))
+        
+        # Mark pre-generated audio as used
+        pre_gen.status = "used"
+        pre_gen.used_at = datetime.utcnow()
+        pre_gen.used_session_id = session_id
+        
+        q.commit()
+        
+        print(f"[journey] Pre-gen status check: found and using pre-gen for day {journey_day}, session={session_id}")
+        
+        return {
+            "has_pre_gen": True,
+            "audio_url": public_url,
+            "session_id": session_id,
+            "duration_ms": duration_ms_val,
+            "journey_day": journey_day,
+            "title": f"Day {journey_day} Journey",
+            "subtitle": "Your personalized session",
+            "session_number": journey_day,
+            "script_excerpt": script_text[:600] + ("..." if len(script_text) > 600 else ""),
+            "track_id": pre_gen.track_id or "pre_generated",
+            "voice_id": pre_gen.voice_id or "default",
+        }
+        
+    except Exception as e:
+        print(f"[journey] Error in pre-gen-status: {e}")
+        return {
+            "has_pre_gen": False,
+            "audio_url": None,
+            "session_id": None,
+            "duration_ms": None,
+            "journey_day": None,
+            "error": str(e),
+        }
 
 
 @r.post("/api/journey/generate", response_model=GenerateOut)
