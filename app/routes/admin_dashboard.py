@@ -412,7 +412,7 @@ def get_user_detail(
             "id": j.id,
             "entry_type": j.entry_type,
             "title": j.title,
-            "body": j.body[:200] if j.body else None,  # Truncate for preview
+            "body": j.body[:200] if j.body else None,
             "date": j.date.isoformat() if j.date else None,
         })
     
@@ -735,7 +735,7 @@ def list_journal_entries(
             "user_name": user.name if user else None,
             "entry_type": e.entry_type,
             "title": e.title,
-            "body": e.body[:300] if e.body else None,  # Truncate for preview
+            "body": e.body[:300] if e.body else None,
             "date": e.date.isoformat() if e.date else None,
         })
     
