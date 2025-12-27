@@ -69,13 +69,20 @@ def get_dashboard_stats(
 ):
     """
     Get dashboard statistics overview.
+    Only counts active (non-deleted) users.
     """
     now = datetime.utcnow()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_ago = now - timedelta(days=7)
     
-    # Total users
-    total_users = db.query(func.count(models.Users.id)).scalar() or 0
+    # ==========================================================================
+    # SOFT DELETE: Only count active (non-deleted) users
+    # ==========================================================================
+    total_users = (
+        db.query(func.count(models.Users.id))
+        .filter(models.Users.deleted_at.is_(None))
+        .scalar() or 0
+    )
     
     # Active users today (users with sessions today)
     active_today_sessions = (
@@ -156,11 +163,20 @@ def list_users(
     search: Optional[str] = Query(None),
     sort_by: str = Query("created_at"),
     sort_order: str = Query("desc"),
+    include_deleted: bool = Query(False),
 ):
     """
     List all users with pagination and search.
+    By default, excludes deleted users (deleted_at is not null).
+    Set include_deleted=true to see all users including deleted ones.
     """
     query = db.query(models.Users)
+    
+    # ==========================================================================
+    # SOFT DELETE: Filter out deleted users by default
+    # ==========================================================================
+    if not include_deleted:
+        query = query.filter(models.Users.deleted_at.is_(None))
     
     # Search filter
     if search:
@@ -222,6 +238,7 @@ def list_users(
             "last_active": last_session[0].isoformat() if last_session and last_session[0] else None,
             "total_sessions": session_count,
             "total_activities": activity_count,
+            "deleted_at": user.deleted_at.isoformat() if user.deleted_at else None,
         })
     
     total_pages = (total + page_size - 1) // page_size
@@ -366,12 +383,62 @@ def get_user_detail(
         "email": user.email,
         "journey_day": user.journey_day or 1,
         "created_at": user.created_at.isoformat() if user.created_at else None,
+        "deleted_at": user.deleted_at.isoformat() if user.deleted_at else None,
         "intake_data": intake_data,
         "schema_scores": schema_scores,
         "phq9_scores": phq9_scores,
         "recent_sessions": recent_sessions,
         "recent_activities": recent_activities,
         "recent_journal": recent_journal,
+    }
+
+
+# =============================================================================
+# USER DELETION (SOFT DELETE)
+# =============================================================================
+
+
+@r.delete("/users/{user_id}")
+def delete_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+):
+    """
+    Soft delete a user by setting deleted_at timestamp.
+    
+    SOFT DELETE BEHAVIOR:
+    - Sets deleted_at = current timestamp
+    - User cannot sign in anymore
+    - User can sign up again with same email (creates new account)
+    - Old data preserved for analytics/audit under old user_hash
+    - Does NOT delete any related data (sessions, activities, journal, etc.)
+    """
+    user = db.query(models.Users).filter(models.Users.id == user_id).first()
+    
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+    
+    # Check if already deleted
+    if user.deleted_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User is already deleted",
+        )
+    
+    # Set deleted_at timestamp (soft delete)
+    user.deleted_at = datetime.utcnow()
+    
+    db.commit()
+    db.refresh(user)
+    
+    return {
+        "success": True,
+        "message": f"User {user.email or user.user_hash} has been deleted",
+        "user_id": user.id,
+        "deleted_at": user.deleted_at.isoformat(),
     }
 
 
