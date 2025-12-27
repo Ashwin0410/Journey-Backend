@@ -154,6 +154,15 @@ class Users(Base):
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+    # =============================================================================
+    # SOFT DELETE SUPPORT (Admin Console Feature)
+    # =============================================================================
+    # When deleted_at is set, user is considered "deleted":
+    # - Cannot sign in (auth routes check deleted_at IS NULL)
+    # - Can sign up again with same email (creates new account)
+    # - Old data preserved for analytics/audit under old user_hash
+    deleted_at = Column(DateTime(timezone=True), nullable=True, index=True)
+
 
 
 
