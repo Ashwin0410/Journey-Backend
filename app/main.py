@@ -44,7 +44,7 @@ if Base is not None and engine is not None:
 
 
 # =============================================================================
-# AUTO-MIGRATION: Add user_hash column to activities table
+# AUTO-MIGRATION: Database migrations on startup
 # =============================================================================
 def run_migrations():
     """Run database migrations on startup."""
@@ -53,7 +53,9 @@ def run_migrations():
     try:
         from sqlalchemy import text
         with engine.connect() as conn:
-            # Check if user_hash column exists in activities table
+            # -----------------------------------------------------------------
+            # Migration 1: Add user_hash column to activities table
+            # -----------------------------------------------------------------
             result = conn.execute(text("PRAGMA table_info(activities)"))
             columns = [row[1] for row in result.fetchall()]
             
@@ -68,6 +70,25 @@ def run_migrations():
                 conn.execute(text("CREATE INDEX ix_activities_user_hash ON activities (user_hash)"))
                 conn.commit()
                 print("[migration] Created index ix_activities_user_hash")
+            
+            # -----------------------------------------------------------------
+            # Migration 2: Add deleted_at column to users table (Soft Delete)
+            # -----------------------------------------------------------------
+            result = conn.execute(text("PRAGMA table_info(users)"))
+            user_columns = [row[1] for row in result.fetchall()]
+            
+            if 'deleted_at' not in user_columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN deleted_at DATETIME"))
+                conn.commit()
+                print("[migration] Added deleted_at column to users table")
+            
+            # Check if index exists for deleted_at
+            result = conn.execute(text("SELECT name FROM sqlite_master WHERE type='index' AND name='ix_users_deleted_at'"))
+            if not result.fetchone():
+                conn.execute(text("CREATE INDEX ix_users_deleted_at ON users (deleted_at)"))
+                conn.commit()
+                print("[migration] Created index ix_users_deleted_at")
+            
     except Exception as e:
         print(f"[migration] Error running migrations: {e}")
 
