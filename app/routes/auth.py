@@ -122,6 +122,37 @@ def auto_link_patient_from_invites(db: Session, user: models.Users) -> None:
 
 
 # ============================================================================
+# HELPER: CLEAR EMAIL FROM DELETED USERS
+# ============================================================================
+
+
+def clear_deleted_user_email(db: Session, email: str) -> None:
+    """
+    If there are soft-deleted users with this email, change their email
+    to free up the email for re-registration.
+    
+    This is needed because email has a UNIQUE constraint.
+    """
+    deleted_users = (
+        db.query(models.Users)
+        .filter(
+            models.Users.email == email,
+            models.Users.deleted_at.isnot(None),
+        )
+        .all()
+    )
+    
+    for user in deleted_users:
+        # Change email to: deleted_{timestamp}_{original_email}
+        timestamp = int(user.deleted_at.timestamp()) if user.deleted_at else int(datetime.utcnow().timestamp())
+        user.email = f"deleted_{timestamp}_{email}"
+    
+    if deleted_users:
+        db.commit()
+        print(f"[auth] Cleared email from {len(deleted_users)} deleted user(s) for re-registration")
+
+
+# ============================================================================
 # GOOGLE OAUTH ENDPOINTS (EXISTING)
 # ============================================================================
 
@@ -239,6 +270,8 @@ def google_callback(
             # Add timestamp to make user_hash unique
             unique_suffix = uuid.uuid4().hex[:8]
             user_hash = f"google_{sub}_{unique_suffix}"
+            # Clear email from deleted user to avoid UNIQUE constraint violation
+            clear_deleted_user_email(db, email)
         
         is_new_user = True
         user = models.Users(
@@ -343,7 +376,7 @@ def register(
     
     SOFT DELETE BEHAVIOR:
     - If email exists with deleted_at=NULL → reject (account already exists)
-    - If email exists with deleted_at set → allow registration (create new account)
+    - If email exists with deleted_at set → clear old email, allow registration
     """
     
     # ==========================================================================
@@ -363,6 +396,11 @@ def register(
             status_code=400,
             detail="An account with this email already exists",
         )
+    
+    # ==========================================================================
+    # SOFT DELETE: Clear email from any deleted users to avoid UNIQUE violation
+    # ==========================================================================
+    clear_deleted_user_email(db, payload.email)
     
     # Generate unique user_hash for email users
     unique_id = uuid.uuid4().hex[:12]
