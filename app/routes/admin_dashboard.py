@@ -1,8 +1,9 @@
 # routes/admin_dashboard.py
-# CHANGE #10: Admin Console Dashboard Routes
+# CHANGE #10: Admin Console Dashboard Routes (No Auth Required)
 """
 Admin dashboard endpoints for the ReWire Admin Console.
 Provides statistics, user management, and data viewing capabilities.
+NO AUTHENTICATION - Direct access for simplicity.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -12,7 +13,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc
 
-from ..auth_utils import get_db, require_admin
+from ..auth_utils import get_db
 from .. import models
 
 
@@ -103,7 +104,6 @@ class PaginatedResponse(BaseModel):
 
 @r.get("/stats", response_model=DashboardStats)
 def get_dashboard_stats(
-    admin: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     """
@@ -192,7 +192,6 @@ def get_dashboard_stats(
 
 @r.get("/users")
 def list_users(
-    admin: dict = Depends(require_admin),
     db: Session = Depends(get_db),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
@@ -290,7 +289,6 @@ def list_users(
 @r.get("/users/{user_id}")
 def get_user_detail(
     user_id: int,
-    admin: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     """
@@ -460,7 +458,6 @@ def get_user_detail(
 
 @r.get("/sessions")
 def list_sessions(
-    admin: dict = Depends(require_admin),
     db: Session = Depends(get_db),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
@@ -555,7 +552,6 @@ def list_sessions(
 
 @r.get("/activities")
 def list_activity_completions(
-    admin: dict = Depends(require_admin),
     db: Session = Depends(get_db),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
@@ -632,7 +628,6 @@ def list_activity_completions(
 
 @r.get("/chills")
 def list_chills_moments(
-    admin: dict = Depends(require_admin),
     db: Session = Depends(get_db),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
@@ -695,7 +690,6 @@ def list_chills_moments(
 
 @r.get("/journal")
 def list_journal_entries(
-    admin: dict = Depends(require_admin),
     db: Session = Depends(get_db),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
