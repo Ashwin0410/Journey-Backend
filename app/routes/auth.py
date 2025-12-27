@@ -203,11 +203,15 @@ def google_callback(
 
     user_hash = f"google_{sub}"
 
+    # ==========================================================================
+    # SOFT DELETE CHECK: Find active (non-deleted) user by Google provider_id
+    # ==========================================================================
     user = (
         db.query(models.Users)
         .filter(
             models.Users.provider == "google",
             models.Users.provider_id == sub,
+            models.Users.deleted_at.is_(None),  # Only find non-deleted users
         )
         .first()
     )
@@ -216,6 +220,26 @@ def google_callback(
     is_new_user = False
 
     if not user:
+        # ==========================================================================
+        # SOFT DELETE: Check if there's a deleted user with same Google ID
+        # If so, create a completely new account (new user_hash)
+        # ==========================================================================
+        deleted_user = (
+            db.query(models.Users)
+            .filter(
+                models.Users.provider == "google",
+                models.Users.provider_id == sub,
+                models.Users.deleted_at.isnot(None),
+            )
+            .first()
+        )
+        
+        if deleted_user:
+            # User was previously deleted, create NEW account with new user_hash
+            # Add timestamp to make user_hash unique
+            unique_suffix = uuid.uuid4().hex[:8]
+            user_hash = f"google_{sub}_{unique_suffix}"
+        
         is_new_user = True
         user = models.Users(
             user_hash=user_hash,
@@ -269,6 +293,15 @@ def get_me(
 
     user = current_user
 
+    # ==========================================================================
+    # SOFT DELETE CHECK: If user is deleted, reject the request
+    # ==========================================================================
+    if user.deleted_at is not None:
+        raise HTTPException(
+            status_code=401,
+            detail="Account not found. Please sign up to create a new account.",
+        )
+
     if user.journey_day is None:
         user.journey_day = 1
         changed = True
@@ -307,12 +340,21 @@ def register(
     - Creates a new user with provider="email"
     - Hashes the password using bcrypt
     - Returns the user object (frontend will need to call /login to get token)
+    
+    SOFT DELETE BEHAVIOR:
+    - If email exists with deleted_at=NULL → reject (account already exists)
+    - If email exists with deleted_at set → allow registration (create new account)
     """
     
-    # Check if email already exists
+    # ==========================================================================
+    # SOFT DELETE: Check if email exists for an ACTIVE (non-deleted) user
+    # ==========================================================================
     existing_user = (
         db.query(models.Users)
-        .filter(models.Users.email == payload.email)
+        .filter(
+            models.Users.email == payload.email,
+            models.Users.deleted_at.is_(None),  # Only check active users
+        )
         .first()
     )
     
@@ -376,12 +418,21 @@ def login(
     
     - Validates email exists and password matches
     - Returns JWT token and user object
+    
+    SOFT DELETE BEHAVIOR:
+    - If user is deleted (deleted_at is set) → reject login
+    - User must sign up again to create new account
     """
     
-    # Find user by email
+    # ==========================================================================
+    # SOFT DELETE: Find user by email, only if NOT deleted
+    # ==========================================================================
     user = (
         db.query(models.Users)
-        .filter(models.Users.email == payload.email)
+        .filter(
+            models.Users.email == payload.email,
+            models.Users.deleted_at.is_(None),  # Only find active users
+        )
         .first()
     )
     
