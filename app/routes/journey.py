@@ -245,6 +245,7 @@ def _get_therapist_guidance(q: Session, user_hash: str | None) -> str | None:
 
 # =============================================================================
 # CHANGE #1: Check for and serve pre-generated audio
+# FIX Issue #8: Search backward for most recent unused pre-gen if exact day not found
 # =============================================================================
 
 
@@ -252,12 +253,19 @@ def _check_pre_generated_audio(q: Session, user_hash: str, journey_day: int) -> 
     """
     Check if there's pre-generated audio ready for this user's journey day.
     
+    FIX Issue #8: If no exact match for journey_day, search backward for the most
+    recent unused pre-generated audio. This handles cases where:
+    - User missed a day (pre-gen for day 3, but user is now on day 4)
+    - System advanced journey_day but pre-gen was for previous day
+    - Any day mismatch between pre-generation and current session
+    
     Returns the PreGeneratedAudio record if found and ready, None otherwise.
     """
     if not user_hash or not journey_day:
         return None
     
     try:
+        # Step 1: Try exact match first (original behavior)
         pre_gen = (
             q.query(PreGeneratedAudio)
             .filter(
@@ -270,8 +278,29 @@ def _check_pre_generated_audio(q: Session, user_hash: str, journey_day: int) -> 
         )
         
         if pre_gen and pre_gen.audio_path:
-            print(f"[journey] Found pre-generated audio for user {user_hash} day {journey_day}, id={pre_gen.id}")
+            print(f"[journey] Found pre-generated audio for user {user_hash} day {journey_day} (exact match), id={pre_gen.id}")
             return pre_gen
+        
+        # FIX Issue #8: Step 2: No exact match - search backward for most recent unused pre-gen
+        # This catches cases where pre-gen was created for a previous day but wasn't used
+        pre_gen_fallback = (
+            q.query(PreGeneratedAudio)
+            .filter(
+                PreGeneratedAudio.user_hash == user_hash,
+                PreGeneratedAudio.for_journey_day < journey_day,  # Any previous day
+                PreGeneratedAudio.for_journey_day >= 2,  # Day 2+ only (Day 1 uses static audio)
+                PreGeneratedAudio.status == "ready",  # Must be ready and unused
+            )
+            .order_by(PreGeneratedAudio.for_journey_day.desc())  # Most recent day first
+            .first()
+        )
+        
+        if pre_gen_fallback and pre_gen_fallback.audio_path:
+            print(f"[journey] FIX Issue #8: Found fallback pre-generated audio for user {user_hash}")
+            print(f"[journey]   - Current journey_day: {journey_day}")
+            print(f"[journey]   - Pre-gen was for day: {pre_gen_fallback.for_journey_day}")
+            print(f"[journey]   - Pre-gen id: {pre_gen_fallback.id}")
+            return pre_gen_fallback
         
         return None
     except Exception as e:
@@ -344,6 +373,11 @@ def _use_pre_generated_audio(
     
     q.commit()
     
+    # FIX Issue #8: Log if we used a fallback (different day than current)
+    current_day = effective.get("journey_day")
+    if current_day and pre_gen.for_journey_day != current_day:
+        print(f"[journey] FIX Issue #8: Used pre-gen from day {pre_gen.for_journey_day} for current day {current_day}")
+    
     print(f"[journey] Using pre-generated audio for session {session_id}, pre_gen_id={pre_gen.id}")
     
     return GenerateOut(
@@ -356,12 +390,13 @@ def _use_pre_generated_audio(
         voice_id=pre_gen.voice_id or "default",
         music_folder="pre_generated",
         music_file=audio_filename,
-        journey_day=pre_gen.for_journey_day,
+        journey_day=effective.get("journey_day") or pre_gen.for_journey_day,  # Use current day, not pre-gen day
     )
 
 
 # =============================================================================
 # FIX: Pre-gen status endpoint for instant playback (frontend checks this first)
+# FIX Issue #8: Also uses fallback search for pre-generated audio
 # =============================================================================
 
 
@@ -375,6 +410,8 @@ def get_pre_gen_status(
     
     This endpoint is called by the frontend BEFORE showing any loading screen.
     If pre-gen exists, the frontend can skip the loader and go straight to the player.
+    
+    FIX Issue #8: Now also searches backward for unused pre-gen if exact day not found.
     
     Returns:
         - has_pre_gen: bool - whether pre-generated audio is available
@@ -413,7 +450,7 @@ def get_pre_gen_status(
                 "session_number": 1,
             }
         
-        # Day 2+: Check for pre-generated audio
+        # Day 2+: Check for pre-generated audio (now with Issue #8 fallback)
         pre_gen = _check_pre_generated_audio(q, user_hash, journey_day)
         
         if not pre_gen:
@@ -477,6 +514,10 @@ def get_pre_gen_status(
         
         q.commit()
         
+        # FIX Issue #8: Log if using fallback
+        if pre_gen.for_journey_day != journey_day:
+            print(f"[journey] Pre-gen status: using fallback from day {pre_gen.for_journey_day} for current day {journey_day}")
+        
         print(f"[journey] Pre-gen status check: found and using pre-gen for day {journey_day}, session={session_id}")
         
         return {
@@ -484,7 +525,7 @@ def get_pre_gen_status(
             "audio_url": public_url,
             "session_id": session_id,
             "duration_ms": duration_ms_val,
-            "journey_day": journey_day,
+            "journey_day": journey_day,  # Return current journey day, not pre-gen day
             "title": f"Day {journey_day} Journey",
             "subtitle": "Your personalized session",
             "session_number": journey_day,
@@ -599,6 +640,7 @@ def generate(x: IntakeIn, q: Session = Depends(db)):
 
     # =============================================================================
     # CHANGE #1: Check for pre-generated audio for Day 2+
+    # FIX Issue #8: Now searches backward for unused pre-gen if exact day not found
     # =============================================================================
     if journey_day is not None and journey_day >= 2 and x.user_hash:
         pre_gen = _check_pre_generated_audio(q, x.user_hash, journey_day)
