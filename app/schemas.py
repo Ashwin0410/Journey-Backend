@@ -132,7 +132,21 @@ class ActivityCurrentOut(BaseModel):
     activity: Optional[ActivityRecommendationOut] = None
 
 
+# =============================================================================
+# STATS SCHEMA - FIX Issue #6: Day Streak and Activities Count
+# =============================================================================
 
+
+class StatsOut(BaseModel):
+    """
+    Stats for timeline display.
+    FIX Issue #6: Added day_streak and activities_completed for Felix's timeline UI.
+    """
+    day_streak: int = 0
+    activities_completed: int = 0
+    # Legacy fields (keep for backwards compatibility)
+    chills_recorded: Optional[int] = None
+    total_sessions: Optional[int] = None
 
 
 class TodaySummaryOut(BaseModel):
@@ -147,6 +161,9 @@ class TodaySummaryOut(BaseModel):
     recommended_activity: Optional[ActivityRecommendationOut] = None
     
     postal_code: Optional[str] = None
+    
+    # FIX Issue #6: Added stats field for day streak and activities count
+    stats: Optional[StatsOut] = None
 
 
 
@@ -313,6 +330,8 @@ class JournalTimelineOut(BaseModel):
     future: List[JournalEntryOut]
     today: List[JournalEntryOut]
     past: List[JournalEntryOut]
+    # FIX Issue #6: Added stats to journal timeline response
+    stats: Optional[StatsOut] = None
 
 
 
