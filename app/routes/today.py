@@ -108,39 +108,41 @@ def get_today_summary(
         day_streak = calculate_day_streak(q, user_hash)
         activities_completed = calculate_activities_completed(q, user_hash)
         
+        # Create StatsOut object
+        stats_obj = schemas.StatsOut(
+            day_streak=day_streak,
+            activities_completed=activities_completed
+        )
+        
         # Add stats to the summary response
         # Handle different response types from narrative.build_today_summary
         
-        if hasattr(summary, 'dict'):
-            # Pydantic model - convert to dict, modify, return
-            summary_dict = summary.dict()
-            if 'stats' not in summary_dict or summary_dict['stats'] is None:
-                summary_dict['stats'] = {}
-            summary_dict['stats']['day_streak'] = day_streak
-            summary_dict['stats']['activities_completed'] = activities_completed
+        if hasattr(summary, 'model_dump'):
+            # Pydantic v2 model - convert to dict, modify, return
+            summary_dict = summary.model_dump()
+            summary_dict['stats'] = stats_obj.model_dump()
             return summary_dict
             
-        elif hasattr(summary, 'stats'):
-            # Object with stats attribute
-            if summary.stats is None:
-                summary.stats = {}
-            if isinstance(summary.stats, dict):
-                summary.stats['day_streak'] = day_streak
-                summary.stats['activities_completed'] = activities_completed
-            else:
-                # Stats is an object, try to set attributes
-                try:
-                    summary.stats.day_streak = day_streak
-                    summary.stats.activities_completed = activities_completed
-                except AttributeError:
-                    pass
-                    
+        elif hasattr(summary, 'dict'):
+            # Pydantic v1 model - convert to dict, modify, return
+            summary_dict = summary.dict()
+            summary_dict['stats'] = stats_obj.dict()
+            return summary_dict
+            
         elif isinstance(summary, dict):
             # Dict response
-            if 'stats' not in summary or summary['stats'] is None:
-                summary['stats'] = {}
-            summary['stats']['day_streak'] = day_streak
-            summary['stats']['activities_completed'] = activities_completed
+            summary['stats'] = stats_obj.dict() if hasattr(stats_obj, 'dict') else {
+                'day_streak': day_streak,
+                'activities_completed': activities_completed
+            }
+            return summary
+            
+        else:
+            # Try to set stats attribute directly
+            try:
+                summary.stats = stats_obj
+            except AttributeError:
+                print("[today.py] Could not set stats on summary object")
             
     except Exception as e:
         print(f"[today.py] Error adding stats to summary: {e}")
