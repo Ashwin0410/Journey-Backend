@@ -42,6 +42,38 @@ class Feedback(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+# =============================================================================
+# SUGGESTIONS TABLE - Issue #5: General feedback/suggestions from users
+# =============================================================================
+
+
+class Suggestions(Base):
+    """
+    Stores general user feedback and suggestions.
+    
+    Issue #5: This is for the 'Share your thoughts' modal where users can
+    submit general feedback about activities or the app (separate from
+    session-specific Feedback which tracks chills/relevance ratings).
+    """
+    __tablename__ = "suggestions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    
+    # The feedback/suggestion text
+    feedback = Column(Text, nullable=False)
+    
+    # Type of feedback: "general", "activity_suggestion", "bug_report", etc.
+    type = Column(String, default="general", index=True)
+    
+    # Optional: link to user who submitted
+    user_hash = Column(String, index=True, nullable=True)
+    
+    # Optional: if feedback is about a specific activity
+    activity_id = Column(Integer, index=True, nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 class KV(Base):
     __tablename__ = "kv"
     k = Column(String, primary_key=True)
