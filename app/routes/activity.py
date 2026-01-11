@@ -456,23 +456,38 @@ def _generate_activities_via_llm(
             tags = item.get("tags") or []
             location_label = item.get("location_label")
 
-            # CHANGE 5: Default to first available place if no location specified
-            if not location_label and all_nearby_places:
-                location_label = all_nearby_places[0]["name"]
-            elif not location_label:
-                location_label = "nearby location"
-
-            # Try to find coordinates for this location
+            # FIX Issue #2: Improved fallback for location_label with coordinates
             lat: Optional[float] = None
             lng: Optional[float] = None
             place_id: Optional[str] = None
             
-            # Look up place details if location_label matches a nearby place
-            place_detail = _find_place_by_name(location_label, all_nearby_places)
-            if place_detail:
-                lat = place_detail["lat"]
-                lng = place_detail["lng"]
-                place_id = place_detail["place_id"]
+            # First, try to find coordinates for the LLM-generated location_label
+            if location_label:
+                place_detail = _find_place_by_name(location_label, all_nearby_places)
+                if place_detail:
+                    lat = place_detail["lat"]
+                    lng = place_detail["lng"]
+                    place_id = place_detail["place_id"]
+                    # Use the exact name from the place detail for consistency
+                    location_label = place_detail["name"]
+                    print(f"[activity] Matched location '{location_label}' -> lat={lat}, lng={lng}")
+            
+            # FIX Issue #2: If no location or no match, use the first available place WITH coordinates
+            if not location_label or (lat is None and all_nearby_places):
+                if all_nearby_places:
+                    fallback_place = all_nearby_places[0]
+                    location_label = fallback_place["name"]
+                    lat = fallback_place["lat"]
+                    lng = fallback_place["lng"]
+                    place_id = fallback_place["place_id"]
+                    print(f"[activity] Using fallback location '{location_label}' -> lat={lat}, lng={lng}")
+                else:
+                    # No nearby places available - use generic label but include GPS coords if available
+                    location_label = "Nearby"
+                    if gps_lat is not None and gps_lng is not None:
+                        lat = gps_lat
+                        lng = gps_lng
+                        print(f"[activity] No nearby places, using GPS coords -> lat={lat}, lng={lng}")
 
             act = schemas.ActivityBase(
                 title=title,
@@ -802,6 +817,86 @@ def get_current(
     return schemas.ActivityCurrentOut(activity=_to_activity_out(act) if act else None)
 
 
+# =============================================================================
+# FIX Issue #2: Added /today endpoint as alias for getting today's recommended activity
+# =============================================================================
+
+@r.get(
+    "/today",
+    response_model=schemas.ActivityTodayOut,
+    summary="Get today's recommended activity for the user.",
+)
+def get_today_activity(
+    user_hash: str = Query(..., description="User hash"),
+    gps_lat: Optional[float] = Query(None, description="GPS latitude for location-based activities"),
+    gps_lng: Optional[float] = Query(None, description="GPS longitude for location-based activities"),
+    db: Session = Depends(get_db),
+):
+    """
+    Get today's recommended activity for the user.
+    
+    This endpoint first checks for an existing current activity (suggested/started).
+    If none exists, it generates a new recommendation.
+    
+    Returns activity with full location data (location_label, lat, lng, place_id).
+    """
+    # First, check if user has a current activity
+    current_act = _get_current_activity(db, user_hash=user_hash)
+    
+    if current_act:
+        # Return the current activity
+        activity_out = _to_activity_out(current_act)
+        print(f"[activity] /today returning current activity: {activity_out.title}, location={activity_out.location_label}, lat={activity_out.lat}, lng={activity_out.lng}")
+        return schemas.ActivityTodayOut(
+            activity=activity_out,
+            is_new=False,
+        )
+    
+    # No current activity - generate a new recommendation
+    # Get context from user history
+    fb = _fallback_context_from_history(db, user_hash)
+    
+    print(f"[activity] /today generating new activity with gps_lat={gps_lat}, gps_lng={gps_lng}")
+    
+    generated = _generate_activities_via_llm(
+        mood=fb.get("mood"),
+        schema_hint=fb.get("schema_hint"),
+        postal_code=fb.get("postal_code"),
+        goal_today=fb.get("goal_today"),
+        place=fb.get("place"),
+        count=1,  # Only need 1 for today
+        emotion_word=fb.get("emotion_word"),
+        chills_detail=fb.get("chills_detail"),
+        last_insight=fb.get("last_insight"),
+        chills_level=fb.get("chills_level"),
+        life_area=fb.get("life_area"),
+        life_focus=fb.get("life_focus"),
+        week_actions=fb.get("week_actions", []),
+        gps_lat=gps_lat,
+        gps_lng=gps_lng,
+    )
+    
+    if not generated:
+        raise HTTPException(status_code=404, detail="Could not generate activity")
+    
+    # Store and commit the activity
+    rows = _store_generated_activities(db, activities=generated[:1], user_hash=user_hash)
+    
+    if not rows:
+        raise HTTPException(status_code=500, detail="Failed to store activity")
+    
+    # Commit as the user's current activity
+    _commit_activity(db, user_hash=user_hash, activity_id=rows[0].id)
+    
+    activity_out = _to_activity_out(rows[0])
+    print(f"[activity] /today generated new activity: {activity_out.title}, location={activity_out.location_label}, lat={activity_out.lat}, lng={activity_out.lng}")
+    
+    return schemas.ActivityTodayOut(
+        activity=activity_out,
+        is_new=True,
+    )
+
+
 @r.post(
     "/commit",
     summary="Persist a specific activity as the user's current recommendation.",
@@ -1009,7 +1104,7 @@ def get_recommendation(
 
 
 # =============================================================================
-# BUG FIX (Change 7): Activity library now filters by user_hash
+# FIX Issue #1: Added limit parameter to /library endpoint
 # =============================================================================
 
 @r.get(
@@ -1025,10 +1120,14 @@ def get_recommendation(
 )
 def get_library(
     user_hash: Optional[str] = Query(None, description="User hash to filter activities and include therapist-suggested activities"),
+    limit: int = Query(6, ge=1, le=20, description="Maximum number of activities to return"),
     db: Session = Depends(get_db),
 ):
     """
-    Return the latest 6 active activities for the user plus any therapist-suggested activities.
+    Return the latest active activities for the user plus any therapist-suggested activities.
+    
+    FIX Issue #1: Added limit parameter to control number of activities returned.
+    Default is 6, can be set from 1 to 20.
     
     BUG FIX (Change 7): Now filters activities by user_hash to prevent cross-user data pollution.
     Previously, all activities were returned globally regardless of which user created them.
@@ -1045,8 +1144,10 @@ def get_library(
             (models.Activities.user_hash == None)
         )
     
-    # Get latest 6 activities for this user
-    acts = query.order_by(models.Activities.created_at.desc()).limit(6).all()
+    # FIX Issue #1: Use limit parameter instead of hardcoded 6
+    acts = query.order_by(models.Activities.created_at.desc()).limit(limit).all()
+    
+    print(f"[activity] /library returning {len(acts)} activities for user_hash={user_hash}, limit={limit}")
 
     out: List[schemas.ActivityOut] = []
     
