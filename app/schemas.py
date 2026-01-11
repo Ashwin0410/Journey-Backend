@@ -50,6 +50,34 @@ class FeedbackIn(BaseModel):
     session_insight: str | None = None    
 
 
+# =============================================================================
+# SUGGESTION SCHEMAS - Issue #5: General feedback/suggestions from users
+# =============================================================================
+
+
+class SuggestionIn(BaseModel):
+    """Schema for general user feedback/suggestions (e.g., activity suggestions).
+    
+    Issue #5: This is for the 'Share your thoughts' modal where users can
+    submit general feedback about activities or the app.
+    """
+    feedback: str
+    type: str = "general"  # "general", "activity_suggestion", "bug_report", etc.
+    user_hash: Optional[str] = None
+    activity_id: Optional[int] = None  # Optional: if feedback is about a specific activity
+
+
+class SuggestionOut(BaseModel):
+    """Schema for suggestion response."""
+    id: int
+    feedback: str
+    type: str
+    user_hash: Optional[str] = None
+    activity_id: Optional[int] = None
+    created_at: datetime
+
+    class Config:
+        orm_mode = True
 
 
 
