@@ -1426,3 +1426,93 @@ def swap_activity(
         "ok": True,
         "activity": _to_activity_out(act),
     }
+
+
+# =============================================================================
+# Issue #8: GET single activity by ID - for timeline activity completion
+# =============================================================================
+
+
+@r.get(
+    "/{activity_id}",
+    response_model=schemas.ActivityOut,
+    summary="Get a single activity by ID",
+)
+def get_activity_by_id(
+    activity_id: int,
+    db: Session = Depends(get_db),
+):
+    """
+    Get a single activity by its ID.
+    
+    Issue #8: This endpoint is used by the frontend (journal.js) to fetch
+    activity details when adding activity completion to the timeline.
+    
+    Note: This endpoint must be defined AFTER all other specific routes
+    (like /current, /today, /library, etc.) to avoid path conflicts.
+    """
+    # Handle negative IDs (therapist activities)
+    if activity_id < 0:
+        therapist_activity_id = -activity_id
+        ta = (
+            db.query(models.TherapistSuggestedActivities)
+            .filter(models.TherapistSuggestedActivities.id == therapist_activity_id)
+            .first()
+        )
+        if not ta:
+            raise HTTPException(status_code=404, detail="Activity not found")
+        
+        # Return therapist activity as ActivityOut
+        tags = ["+ TherapistSuggested"]
+        if ta.category:
+            tags.append(ta.category)
+        
+        return schemas.ActivityOut(
+            id=activity_id,  # Keep the negative ID
+            title=ta.title or "Therapist Activity",
+            description=ta.description or "",
+            life_area=ta.category or "General",
+            effort_level=ta.barrier_level.lower() if ta.barrier_level else "low",
+            reward_type="other",
+            default_duration_min=ta.duration_minutes or 15,
+            location_label="as suggested by therapist",
+            tags=tags,
+            user_hash=None,
+            lat=None,
+            lng=None,
+            place_id=None,
+        )
+    
+    # Regular activity
+    activity = (
+        db.query(models.Activities)
+        .filter(models.Activities.id == activity_id)
+        .first()
+    )
+    
+    if not activity:
+        raise HTTPException(status_code=404, detail="Activity not found")
+    
+    # Convert to output format
+    tags: List[str] = []
+    if activity.tags_json:
+        try:
+            tags = json.loads(activity.tags_json)
+        except Exception:
+            tags = []
+    
+    return schemas.ActivityOut(
+        id=activity.id,
+        title=activity.title or "Activity",
+        description=activity.description or "",
+        life_area=activity.life_area,
+        effort_level=activity.effort_level,
+        reward_type=activity.reward_type,
+        default_duration_min=activity.default_duration_min,
+        location_label=activity.location_label,
+        tags=tags,
+        user_hash=activity.user_hash,
+        lat=activity.lat,
+        lng=activity.lng,
+        place_id=activity.place_id,
+    )
