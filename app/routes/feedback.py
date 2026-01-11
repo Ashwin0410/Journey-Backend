@@ -5,9 +5,9 @@ from typing import Optional
 import threading
 import traceback
 
-from ..schemas import FeedbackIn
+from ..schemas import FeedbackIn, SuggestionIn
 from ..db import SessionLocal
-from ..models import Feedback, Sessions, Users, PreGeneratedAudio
+from ..models import Feedback, Sessions, Users, PreGeneratedAudio, Suggestions
 
 r = APIRouter()
 
@@ -330,3 +330,42 @@ def submit(x: FeedbackIn, q: Session = Depends(db)):
         traceback.print_exc()
     
     return {"ok": True}
+
+
+# =============================================================================
+# Issue #5: General feedback/suggestions endpoint
+# =============================================================================
+
+
+@r.post("/api/feedback/suggestion")
+def submit_suggestion(x: SuggestionIn, q: Session = Depends(db)):
+    """
+    Submit general feedback or suggestions from users.
+    
+    Issue #5: This endpoint handles the 'Share your thoughts' modal
+    where users can submit general feedback about activities or the app.
+    This is separate from session-specific feedback (chills/relevance ratings).
+    
+    Payload:
+    - feedback: str (required) - The feedback text
+    - type: str - Type of feedback: "general", "activity_suggestion", "bug_report", etc.
+    - user_hash: str (optional) - User who submitted
+    - activity_id: int (optional) - If feedback is about a specific activity
+    """
+    suggestion = Suggestions(
+        feedback=x.feedback,
+        type=x.type,
+        user_hash=x.user_hash,
+        activity_id=x.activity_id,
+    )
+    q.add(suggestion)
+    q.commit()
+    q.refresh(suggestion)
+    
+    print(f"[feedback] Saved suggestion id={suggestion.id}, type={x.type}, user={x.user_hash}")
+    
+    return {
+        "ok": True,
+        "id": suggestion.id,
+        "message": "Thank you for your feedback!"
+    }
