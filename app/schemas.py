@@ -111,6 +111,22 @@ class ActivityListOut(BaseModel):
     activities: List[ActivityOut]
 
 
+# =============================================================================
+# FIX Issue #2: Added ActivityTodayOut for /today endpoint
+# =============================================================================
+
+class ActivityTodayOut(BaseModel):
+    """
+    Response schema for /api/journey/activity/today endpoint.
+    
+    FIX Issue #2: Returns today's activity with full location data.
+    - activity: The recommended activity with location_label, lat, lng, place_id
+    - is_new: True if a new activity was generated, False if returning existing current activity
+    """
+    activity: Optional[ActivityRecommendationOut] = None
+    is_new: bool = False
+
+
 class ActivityStartIn(BaseModel):
     activity_id: int
     user_hash: str
