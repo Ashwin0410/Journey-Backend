@@ -1291,6 +1291,12 @@ def start_activity(
     return {"ok": True, "activity_session_id": row.id}
 
 
+# =============================================================================
+# FIX Issue #3b & #5: Enhanced /complete endpoint
+# - Properly marks activity as completed
+# - Returns next_activity for frontend to display after completion
+# =============================================================================
+
 @r.post("/complete", summary="Complete Activity")
 def complete_activity(
     payload: schemas.ActivityStartIn,
@@ -1346,8 +1352,53 @@ def complete_activity(
     db.commit()
     db.refresh(session_row)
 
-    return {"ok": True}
+    # =============================================================================
+    # FIX Issue #5: Generate and return next activity after completion
+    # =============================================================================
+    next_activity_out = None
+    try:
+        # Get context from user history for generating next activity
+        fb = _fallback_context_from_history(db, payload.user_hash)
+        
+        # Generate a new activity
+        generated = _generate_activities_via_llm(
+            mood=fb.get("mood"),
+            schema_hint=fb.get("schema_hint"),
+            postal_code=fb.get("postal_code"),
+            goal_today=fb.get("goal_today"),
+            place=fb.get("place"),
+            count=1,
+            emotion_word=fb.get("emotion_word"),
+            chills_detail=fb.get("chills_detail"),
+            last_insight=fb.get("last_insight"),
+            chills_level=fb.get("chills_level"),
+            life_area=fb.get("life_area"),
+            life_focus=fb.get("life_focus"),
+            week_actions=fb.get("week_actions", []),
+        )
+        
+        if generated:
+            # Store the new activity
+            rows = _store_generated_activities(db, activities=generated[:1], user_hash=payload.user_hash)
+            if rows:
+                # Commit as the user's new current activity
+                _commit_activity(db, user_hash=payload.user_hash, activity_id=rows[0].id)
+                next_activity_out = _to_activity_out(rows[0])
+                print(f"[activity] /complete: Generated next activity '{next_activity_out.title}' for user {payload.user_hash}")
+    except Exception as e:
+        print(f"[activity] /complete: Failed to generate next activity: {e}")
+        # Don't fail the completion if next activity generation fails
 
+    return {
+        "ok": True,
+        "completed_activity_id": activity_id,
+        "next_activity": next_activity_out.model_dump() if next_activity_out else None,
+    }
+
+
+# =============================================================================
+# FIX Issue #2: /swap endpoint now properly sets new activity as current
+# =============================================================================
 
 @r.post("/swap", summary="Swap Activity")
 def swap_activity(
@@ -1413,14 +1464,37 @@ def swap_activity(
         if not act:
             raise HTTPException(status_code=404, detail="Activity not found")
 
+    # =============================================================================
+    # FIX Issue #2: Mark old current activity as "swapped_out" first
+    # =============================================================================
+    existing_current_sessions = (
+        db.query(models.ActivitySessions)
+        .filter(
+            models.ActivitySessions.user_hash == payload.user_hash,
+            models.ActivitySessions.status.in_(["suggested", "started"]),
+        )
+        .all()
+    )
+    
+    for old_session in existing_current_sessions:
+        old_session.status = "swapped_out"
+        print(f"[activity] Marked old activity session {old_session.id} as swapped_out")
+
+    # =============================================================================
+    # FIX Issue #2: Create new session with status "suggested" (not "swapped")
+    # This ensures the new activity becomes the current activity
+    # =============================================================================
     row = models.ActivitySessions(
         user_hash=payload.user_hash,
         activity_id=act.id,
-        status="swapped",
+        status="suggested",  # FIX: Use "suggested" so _get_current_activity() picks it up
         started_at=datetime.utcnow(),
+        created_at=datetime.utcnow(),
     )
     db.add(row)
     db.commit()
+
+    print(f"[activity] Swapped to activity {act.id} '{act.title}' for user {payload.user_hash}")
 
     return {
         "ok": True,
