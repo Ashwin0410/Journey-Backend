@@ -77,6 +77,11 @@ def create_journal_entry(x: JournalEntryIn, q: Session = Depends(db)):
     q.add(row)
     q.commit()
     q.refresh(row)
+    
+    # FIX Issues #1 & #4: Log when activity completion entries are created
+    if x.entry_type == "activity":
+        print(f"[journal] Created activity entry for user {x.user_hash}: title='{x.title}', meta={x.meta}")
+    
     return _row_to_schema(row)
 
 
@@ -112,6 +117,9 @@ def get_journal_timeline(
     # FIX Issues #1 & #4: Calculate stats from ActivitySessions
     day_streak = _calculate_day_streak(q, user_hash)
     activities_completed = _calculate_activities_completed(q, user_hash)
+    
+    # FIX Issues #1 & #4: Log stats for debugging
+    print(f"[journal] Timeline stats for user {user_hash}: day_streak={day_streak}, activities_completed={activities_completed}")
     
     # Return as dict with stats (not using response_model to allow flexible return)
     return {
