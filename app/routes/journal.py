@@ -59,77 +59,6 @@ class JournalAutoSaveOut(BaseModel):
     date: date
 
 
-# ---------- FIX Issues #1 & #4: Stats calculation for timeline ----------
-
-def calculate_day_streak(q: Session, user_hash: str) -> int:
-    """
-    Calculate consecutive days with at least one completed activity.
-    Counts backwards from today/yesterday.
-    """
-    if not user_hash:
-        return 0
-    
-    try:
-        # Query distinct dates with completed activities for this user
-        completed_dates_query = q.query(
-            func.date(ActivitySessions.completed_at).label('activity_date')
-        ).filter(
-            ActivitySessions.user_hash == user_hash,
-            ActivitySessions.status == "completed",
-            ActivitySessions.completed_at.isnot(None)
-        ).distinct().order_by(
-            func.date(ActivitySessions.completed_at).desc()
-        )
-        
-        completed_dates = [row.activity_date for row in completed_dates_query.all() if row.activity_date]
-        
-        if not completed_dates:
-            return 0
-        
-        today = date.today()
-        yesterday = today - timedelta(days=1)
-        
-        # Streak only counts if most recent activity was today or yesterday
-        most_recent = completed_dates[0]
-        if most_recent != today and most_recent != yesterday:
-            return 0
-        
-        # Count consecutive days
-        streak = 1
-        for i in range(1, len(completed_dates)):
-            expected_date = completed_dates[i-1] - timedelta(days=1)
-            if completed_dates[i] == expected_date:
-                streak += 1
-            else:
-                break
-        
-        return streak
-        
-    except Exception as e:
-        print(f"[journal.py] Error calculating day streak: {e}")
-        return 0
-
-
-def calculate_activities_completed(q: Session, user_hash: str) -> int:
-    """
-    Count total completed activities for user.
-    """
-    if not user_hash:
-        return 0
-    
-    try:
-        count = q.query(ActivitySessions).filter(
-            ActivitySessions.user_hash == user_hash,
-            ActivitySessions.status == "completed"
-        ).count()
-        
-        return count
-        
-    except Exception as e:
-        print(f"[journal.py] Error calculating activities completed: {e}")
-        return 0
-
-
 # ---------- Existing endpoints ----------
 
 @r.post("/api/journey/journal", response_model=JournalEntryOut)
@@ -151,19 +80,14 @@ def create_journal_entry(x: JournalEntryIn, q: Session = Depends(db)):
     return _row_to_schema(row)
 
 
-# ---------- FIX Issues #1 & #4: Timeline now returns stats ----------
-
 @r.get("/api/journey/journal/timeline")
 def get_journal_timeline(
     user_hash: str = Query(...),
     q: Session = Depends(db),
-) -> Dict[str, Any]:
+):
     """
-    Get journal timeline with stats for completed activities.
-    
-    FIX Issues #1 & #4: Now returns stats object with:
-    - day_streak: consecutive days with completed activities
-    - activities_completed: total number of completed activities
+    Get journal timeline with stats.
+    FIX Issues #1 & #4: Now returns stats (day_streak, activities_completed) from ActivitySessions table.
     """
     today = datetime.utcnow().date()
     rows: List[JournalEntries] = (
@@ -186,19 +110,105 @@ def get_journal_timeline(
     past.sort(key=lambda e: (e.date, e.id), reverse=True)
     
     # FIX Issues #1 & #4: Calculate stats from ActivitySessions
-    day_streak = calculate_day_streak(q, user_hash)
-    activities_completed = calculate_activities_completed(q, user_hash)
+    day_streak = _calculate_day_streak(q, user_hash)
+    activities_completed = _calculate_activities_completed(q, user_hash)
     
-    # Return timeline with stats
+    # Return as dict with stats (not using response_model to allow flexible return)
     return {
-        "future": [entry.model_dump() if hasattr(entry, 'model_dump') else entry.dict() for entry in future],
-        "today": [entry.model_dump() if hasattr(entry, 'model_dump') else entry.dict() for entry in today_list],
-        "past": [entry.model_dump() if hasattr(entry, 'model_dump') else entry.dict() for entry in past],
+        "future": [_entry_to_dict(e) for e in future],
+        "today": [_entry_to_dict(e) for e in today_list],
+        "past": [_entry_to_dict(e) for e in past],
         "stats": {
             "day_streak": day_streak,
             "activities_completed": activities_completed,
         }
     }
+
+
+def _entry_to_dict(entry: JournalEntryOut) -> Dict[str, Any]:
+    """Convert JournalEntryOut to dict for JSON response."""
+    return {
+        "id": entry.id,
+        "user_hash": entry.user_hash,
+        "entry_type": entry.entry_type,
+        "body": entry.body,
+        "title": entry.title,
+        "session_id": entry.session_id,
+        "meta": entry.meta,
+        "date": entry.date.isoformat() if entry.date else None,
+    }
+
+
+def _calculate_day_streak(q: Session, user_hash: str) -> int:
+    """
+    Calculate consecutive days with completed activities.
+    FIX Issues #1 & #4: Counts from ActivitySessions where status='completed'.
+    """
+    # Get distinct dates with completed activities, ordered descending
+    completed_dates = (
+        q.query(func.date(ActivitySessions.completed_at))
+        .filter(
+            ActivitySessions.user_hash == user_hash,
+            ActivitySessions.status == "completed",
+            ActivitySessions.completed_at.isnot(None),
+        )
+        .distinct()
+        .order_by(func.date(ActivitySessions.completed_at).desc())
+        .all()
+    )
+    
+    if not completed_dates:
+        return 0
+    
+    # Convert to date objects
+    dates = [row[0] for row in completed_dates if row[0] is not None]
+    if not dates:
+        return 0
+    
+    # Handle case where dates might be datetime objects
+    date_set = set()
+    for d in dates:
+        if isinstance(d, datetime):
+            date_set.add(d.date())
+        elif isinstance(d, date):
+            date_set.add(d)
+    
+    if not date_set:
+        return 0
+    
+    today = datetime.utcnow().date()
+    yesterday = today - timedelta(days=1)
+    
+    # Streak must start from today or yesterday
+    if today not in date_set and yesterday not in date_set:
+        return 0
+    
+    # Start counting from the most recent day in streak
+    start_date = today if today in date_set else yesterday
+    streak = 0
+    current_date = start_date
+    
+    while current_date in date_set:
+        streak += 1
+        current_date -= timedelta(days=1)
+    
+    return streak
+
+
+def _calculate_activities_completed(q: Session, user_hash: str) -> int:
+    """
+    Count total completed activities for user.
+    FIX Issues #1 & #4: Counts from ActivitySessions where status='completed'.
+    """
+    count = (
+        q.query(func.count(ActivitySessions.id))
+        .filter(
+            ActivitySessions.user_hash == user_hash,
+            ActivitySessions.status == "completed",
+        )
+        .scalar()
+    )
+    return count or 0
 
 
 @r.patch("/api/journey/journal/{entry_id}", response_model=JournalEntryOut)
