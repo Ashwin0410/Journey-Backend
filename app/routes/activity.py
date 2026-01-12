@@ -529,7 +529,15 @@ def _store_generated_activities(
     
     BUG FIX (Change 7): Now accepts user_hash to scope activities to individual users.
     Without this, activities were stored globally and shared across all users.
+    
+    FIX Issue #3: If no user_hash provided, do NOT store to database.
+    This prevents anonymous/unidentified activity generation from polluting the global pool.
     """
+    # FIX Issue #3: Require user_hash to store activities
+    if not user_hash:
+        print("[activity] WARNING: No user_hash provided - activities will NOT be stored to database")
+        return []
+    
     now = datetime.utcnow()
     rows: List[models.Activities] = []
 
@@ -996,6 +1004,11 @@ def get_recommendation(
     commit_first: bool = Query(False, description="If true (and user_hash present), persist the top pick"),
     db: Session = Depends(get_db),
 ):
+    # =============================================================================
+    # FIX Issue #3: Warn if no user_hash - activities won't be stored
+    # =============================================================================
+    if not user_hash:
+        print("[activity] WARNING: /recommendation called without user_hash - activities will be generated but NOT stored")
 
     # Chills-based fields for personalization
     emotion_word: Optional[str] = None
@@ -1052,6 +1065,7 @@ def get_recommendation(
     )
 
     # BUG FIX (Change 7): Pass user_hash when storing activities
+    # FIX Issue #3: _store_generated_activities now returns empty list if no user_hash
     rows = _store_generated_activities(db, activities=generated, user_hash=user_hash)
 
     # CHANGE #4: Get therapist-suggested activities for THIS SPECIFIC PATIENT ONLY
@@ -1062,6 +1076,32 @@ def get_recommendation(
         if therapist_activities:
             print(f"[activity] Adding {len(therapist_activities)} therapist-suggested activities for patient")
             therapist_activity_outs = [_therapist_activity_to_out(ta) for ta in therapist_activities]
+
+    # =============================================================================
+    # FIX Issue #3: If no rows stored (no user_hash), convert generated activities directly
+    # =============================================================================
+    if not rows and generated:
+        # Convert generated ActivityBase objects to ActivityRecommendationOut
+        # Use negative temporary IDs since they're not stored
+        recs: List[schemas.ActivityRecommendationOut] = []
+        for idx, act in enumerate(generated[:limit]):
+            recs.append(schemas.ActivityRecommendationOut(
+                id=-(idx + 1000),  # Temporary negative ID for unsaved activities
+                title=act.title,
+                description=act.description or "",
+                life_area=act.life_area,
+                effort_level=act.effort_level,
+                reward_type=act.reward_type,
+                default_duration_min=act.default_duration_min,
+                location_label=act.location_label,
+                tags=act.tags or [],
+                user_hash=None,
+                lat=act.lat,
+                lng=act.lng,
+                place_id=act.place_id,
+            ))
+        recs.extend(therapist_activity_outs)
+        return schemas.ActivityRecommendationListOut(activities=recs)
 
     # Filter LLM activities by life_area if specified (query param takes precedence)
     if life_area:
@@ -1133,15 +1173,22 @@ def get_library(
     Previously, all activities were returned globally regardless of which user created them.
     
     CHANGE #4: Therapist activities are now patient-specific and not converted to global Activities.
+    
+    FIX Issue #3: If no user_hash provided, return empty list to prevent data leakage.
     """
+    # =============================================================================
+    # FIX Issue #3: Strict user isolation - require user_hash
+    # =============================================================================
+    if not user_hash:
+        print("[activity] /library called without user_hash - returning empty list for security")
+        return schemas.ActivityListOut(activities=[])
+    
     # BUG FIX (Change 7): Build query with user_hash filter
     # FIX Issue #3: Strict user isolation - only return activities belonging to this specific user
-    # Removed backward compatibility filter (user_hash == None) that was causing cross-user data pollution
-    query = db.query(models.Activities).filter(models.Activities.is_active == True)
-    
-    if user_hash:
-        # FIX Issue #3: Return ONLY this user's activities - strict isolation
-        query = query.filter(models.Activities.user_hash == user_hash)
+    query = db.query(models.Activities).filter(
+        models.Activities.is_active == True,
+        models.Activities.user_hash == user_hash  # FIX Issue #3: Always filter by user_hash
+    )
     
     # FIX Issue #1: Use limit parameter instead of hardcoded 6
     acts = query.order_by(models.Activities.created_at.desc()).limit(limit).all()
@@ -1152,36 +1199,35 @@ def get_library(
     
     # CHANGE #4: Add therapist-suggested activities for THIS SPECIFIC PATIENT ONLY
     # These are returned with virtual (negative) IDs to distinguish them
-    if user_hash:
-        therapist_activities = _get_therapist_suggested_activities_for_patient(db, user_hash)
-        for ta in therapist_activities:
-            tags = ["+ TherapistSuggested"]
-            if ta.category:
-                tags.append(ta.category)
-            
-            # Use negative ID to distinguish from regular activities
-            virtual_id = -ta.id
-            
-            # FIX: Ensure description is never None to prevent Pydantic validation error
-            out.append(
-                schemas.ActivityOut(
-                    id=virtual_id,
-                    title=ta.title or "Therapist Activity",
-                    description=ta.description or "",  # FIX: Default to empty string if None
-                    life_area=ta.category or "General",
-                    effort_level=ta.barrier_level.lower() if ta.barrier_level else "low",
-                    reward_type="other",
-                    default_duration_min=ta.duration_minutes or 15,
-                    location_label="as suggested by therapist",
-                    tags=tags,
-                    user_hash=None,
-                    lat=None,
-                    lng=None,
-                    place_id=None,
-                )
+    therapist_activities = _get_therapist_suggested_activities_for_patient(db, user_hash)
+    for ta in therapist_activities:
+        tags = ["+ TherapistSuggested"]
+        if ta.category:
+            tags.append(ta.category)
+        
+        # Use negative ID to distinguish from regular activities
+        virtual_id = -ta.id
+        
+        # FIX: Ensure description is never None to prevent Pydantic validation error
+        out.append(
+            schemas.ActivityOut(
+                id=virtual_id,
+                title=ta.title or "Therapist Activity",
+                description=ta.description or "",  # FIX: Default to empty string if None
+                life_area=ta.category or "General",
+                effort_level=ta.barrier_level.lower() if ta.barrier_level else "low",
+                reward_type="other",
+                default_duration_min=ta.duration_minutes or 15,
+                location_label="as suggested by therapist",
+                tags=tags,
+                user_hash=None,
+                lat=None,
+                lng=None,
+                place_id=None,
             )
-        if therapist_activities:
-            print(f"[activity] Library: Added {len(therapist_activities)} therapist activities for user {user_hash}")
+        )
+    if therapist_activities:
+        print(f"[activity] Library: Added {len(therapist_activities)} therapist activities for user {user_hash}")
 
     # Then add user's activities
     for a in acts:
