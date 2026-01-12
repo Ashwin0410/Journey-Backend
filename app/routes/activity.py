@@ -1135,14 +1135,13 @@ def get_library(
     CHANGE #4: Therapist activities are now patient-specific and not converted to global Activities.
     """
     # BUG FIX (Change 7): Build query with user_hash filter
+    # FIX Issue #3: Strict user isolation - only return activities belonging to this specific user
+    # Removed backward compatibility filter (user_hash == None) that was causing cross-user data pollution
     query = db.query(models.Activities).filter(models.Activities.is_active == True)
     
     if user_hash:
-        # Return only this user's activities (or activities with no user_hash for backward compatibility)
-        query = query.filter(
-            (models.Activities.user_hash == user_hash) | 
-            (models.Activities.user_hash == None)
-        )
+        # FIX Issue #3: Return ONLY this user's activities - strict isolation
+        query = query.filter(models.Activities.user_hash == user_hash)
     
     # FIX Issue #1: Use limit parameter instead of hardcoded 6
     acts = query.order_by(models.Activities.created_at.desc()).limit(limit).all()
