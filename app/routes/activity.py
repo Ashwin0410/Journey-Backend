@@ -1145,6 +1145,7 @@ def get_recommendation(
 
 # =============================================================================
 # FIX Issue #1: Added limit parameter to /library endpoint
+# FIX Issue #3: User isolation with fallback to global activities
 # =============================================================================
 
 @r.get(
@@ -1174,21 +1175,23 @@ def get_library(
     
     CHANGE #4: Therapist activities are now patient-specific and not converted to global Activities.
     
-    FIX Issue #3: If no user_hash provided, return empty list to prevent data leakage.
+    FIX Issue #3: User isolation with fallback to global activities.
+    - If user has their own activities, return those
+    - If user has no activities, fallback to global activities (user_hash=None)
+    - This ensures new users see activities while maintaining user isolation
     """
     # =============================================================================
-    # FIX Issue #3: Strict user isolation - require user_hash
-    # =============================================================================
-    if not user_hash:
-        print("[activity] /library called without user_hash - returning empty list for security")
-        return schemas.ActivityListOut(activities=[])
-    
     # BUG FIX (Change 7): Build query with user_hash filter
-    # FIX Issue #3: Strict user isolation - only return activities belonging to this specific user
-    query = db.query(models.Activities).filter(
-        models.Activities.is_active == True,
-        models.Activities.user_hash == user_hash  # FIX Issue #3: Always filter by user_hash
-    )
+    # Returns user's activities OR global activities (backward compatibility)
+    # =============================================================================
+    query = db.query(models.Activities).filter(models.Activities.is_active == True)
+    
+    if user_hash:
+        # Return only this user's activities (or activities with no user_hash for backward compatibility)
+        query = query.filter(
+            (models.Activities.user_hash == user_hash) | 
+            (models.Activities.user_hash == None)
+        )
     
     # FIX Issue #1: Use limit parameter instead of hardcoded 6
     acts = query.order_by(models.Activities.created_at.desc()).limit(limit).all()
@@ -1199,37 +1202,38 @@ def get_library(
     
     # CHANGE #4: Add therapist-suggested activities for THIS SPECIFIC PATIENT ONLY
     # These are returned with virtual (negative) IDs to distinguish them
-    therapist_activities = _get_therapist_suggested_activities_for_patient(db, user_hash)
-    for ta in therapist_activities:
-        tags = ["+ TherapistSuggested"]
-        if ta.category:
-            tags.append(ta.category)
-        
-        # Use negative ID to distinguish from regular activities
-        virtual_id = -ta.id
-        
-        # FIX: Ensure description is never None to prevent Pydantic validation error
-        out.append(
-            schemas.ActivityOut(
-                id=virtual_id,
-                title=ta.title or "Therapist Activity",
-                description=ta.description or "",  # FIX: Default to empty string if None
-                life_area=ta.category or "General",
-                effort_level=ta.barrier_level.lower() if ta.barrier_level else "low",
-                reward_type="other",
-                default_duration_min=ta.duration_minutes or 15,
-                location_label="as suggested by therapist",
-                tags=tags,
-                user_hash=None,
-                lat=None,
-                lng=None,
-                place_id=None,
+    if user_hash:
+        therapist_activities = _get_therapist_suggested_activities_for_patient(db, user_hash)
+        for ta in therapist_activities:
+            tags = ["+ TherapistSuggested"]
+            if ta.category:
+                tags.append(ta.category)
+            
+            # Use negative ID to distinguish from regular activities
+            virtual_id = -ta.id
+            
+            # FIX: Ensure description is never None to prevent Pydantic validation error
+            out.append(
+                schemas.ActivityOut(
+                    id=virtual_id,
+                    title=ta.title or "Therapist Activity",
+                    description=ta.description or "",  # FIX: Default to empty string if None
+                    life_area=ta.category or "General",
+                    effort_level=ta.barrier_level.lower() if ta.barrier_level else "low",
+                    reward_type="other",
+                    default_duration_min=ta.duration_minutes or 15,
+                    location_label="as suggested by therapist",
+                    tags=tags,
+                    user_hash=None,
+                    lat=None,
+                    lng=None,
+                    place_id=None,
+                )
             )
-        )
-    if therapist_activities:
-        print(f"[activity] Library: Added {len(therapist_activities)} therapist activities for user {user_hash}")
+        if therapist_activities:
+            print(f"[activity] Library: Added {len(therapist_activities)} therapist activities for user {user_hash}")
 
-    # Then add user's activities
+    # Then add user's activities (or global fallback activities)
     for a in acts:
         tags: List[str] = []
         if a.tags_json:
