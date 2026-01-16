@@ -930,3 +930,73 @@ class VideoSuggestionLog(Base):
     questionnaire_id = Column(Integer, ForeignKey("ml_questionnaires.id"), nullable=True)
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+# =============================================================================
+# MISSING MODELS REQUIRED BY ROUTES
+# =============================================================================
+
+
+class MLQuestionnaireResponse(Base):
+    """
+    ML Questionnaire with individual columns for each question.
+    Required by: routes/intake.py
+    """
+    __tablename__ = "ml_questionnaire_responses"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_hash = Column(String, index=True, nullable=False)
+    
+    # DPES questions (1-7 scale)
+    dpes_1 = Column(Integer, nullable=True)
+    dpes_4 = Column(Integer, nullable=True)
+    dpes_29 = Column(Integer, nullable=True)
+    
+    # NEO-FFI questions (1-5 scale)
+    neo_ffi_10 = Column(Integer, nullable=True)
+    neo_ffi_14 = Column(Integer, nullable=True)
+    neo_ffi_16 = Column(Integer, nullable=True)
+    neo_ffi_45 = Column(Integer, nullable=True)
+    neo_ffi_46 = Column(Integer, nullable=True)
+    
+    # KAMF question (1-7 scale)
+    kamf_4_1 = Column(Integer, nullable=True)
+    
+    # Demographics
+    age = Column(String, nullable=True)
+    gender = Column(String, nullable=True)
+    ethnicity = Column(String, nullable=True)
+    education = Column(String, nullable=True)
+    depression_status = Column(String, nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class BodyMapSpot(Base):
+    """
+    Individual body map spot with x,y coordinates.
+    Required by: routes/chills.py
+    """
+    __tablename__ = "body_map_spots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(String, index=True, nullable=False)
+    x_percent = Column(Float, nullable=False)
+    y_percent = Column(Float, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class PostVideoResponse(Base):
+    """
+    Post-video response (insights, value, action).
+    Required by: routes/chills.py, routes/activity.py
+    """
+    __tablename__ = "post_video_responses"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(String, index=True, nullable=False)
+    insights_text = Column(Text, nullable=True)
+    value_selected = Column(String, nullable=True)
+    value_custom = Column(String, nullable=True)
+    action_selected = Column(String, nullable=True)
+    action_custom = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
