@@ -89,6 +89,119 @@ def run_migrations():
                 conn.commit()
                 print("[migration] Created index ix_users_deleted_at")
             
+            # -----------------------------------------------------------------
+            # Migration 3: Create ML-related tables for video recommendations
+            # -----------------------------------------------------------------
+            # Check if ml_questionnaire_responses table exists
+            result = conn.execute(text(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='ml_questionnaire_responses'"
+            ))
+            if not result.fetchone():
+                conn.execute(text("""
+                    CREATE TABLE ml_questionnaire_responses (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_hash TEXT NOT NULL,
+                        question_code TEXT NOT NULL,
+                        response_value TEXT,
+                        response_numeric REAL,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
+                conn.execute(text("CREATE INDEX ix_ml_questionnaire_user_hash ON ml_questionnaire_responses (user_hash)"))
+                conn.commit()
+                print("[migration] Created ml_questionnaire_responses table")
+            
+            # Check if stimuli_suggestions table exists
+            result = conn.execute(text(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='stimuli_suggestions'"
+            ))
+            if not result.fetchone():
+                conn.execute(text("""
+                    CREATE TABLE stimuli_suggestions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_hash TEXT NOT NULL,
+                        stimulus_rank INTEGER NOT NULL,
+                        stimulus_name TEXT NOT NULL,
+                        stimulus_url TEXT,
+                        stimulus_description TEXT,
+                        score REAL,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
+                conn.execute(text("CREATE INDEX ix_stimuli_suggestions_user_hash ON stimuli_suggestions (user_hash)"))
+                conn.execute(text("CREATE INDEX ix_stimuli_suggestions_rank ON stimuli_suggestions (user_hash, stimulus_rank)"))
+                conn.commit()
+                print("[migration] Created stimuli_suggestions table")
+            
+            # Check if ml_questionnaire_complete column exists in users
+            result = conn.execute(text("PRAGMA table_info(users)"))
+            user_columns = [row[1] for row in result.fetchall()]
+            
+            if 'ml_questionnaire_complete' not in user_columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN ml_questionnaire_complete BOOLEAN DEFAULT 0"))
+                conn.commit()
+                print("[migration] Added ml_questionnaire_complete column to users table")
+            
+            # -----------------------------------------------------------------
+            # Migration 4: Create chills tracking tables
+            # -----------------------------------------------------------------
+            # Check if chills_timestamps table exists
+            result = conn.execute(text(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='chills_timestamps'"
+            ))
+            if not result.fetchone():
+                conn.execute(text("""
+                    CREATE TABLE chills_timestamps (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_id TEXT NOT NULL,
+                        video_time_seconds REAL NOT NULL,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
+                conn.execute(text("CREATE INDEX ix_chills_timestamps_session_id ON chills_timestamps (session_id)"))
+                conn.commit()
+                print("[migration] Created chills_timestamps table")
+            
+            # Check if body_map_spots table exists
+            result = conn.execute(text(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='body_map_spots'"
+            ))
+            if not result.fetchone():
+                conn.execute(text("""
+                    CREATE TABLE body_map_spots (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_id TEXT NOT NULL,
+                        x_percent REAL NOT NULL,
+                        y_percent REAL NOT NULL,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
+                conn.execute(text("CREATE INDEX ix_body_map_spots_session_id ON body_map_spots (session_id)"))
+                conn.commit()
+                print("[migration] Created body_map_spots table")
+            
+            # Check if post_video_responses table exists
+            result = conn.execute(text(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='post_video_responses'"
+            ))
+            if not result.fetchone():
+                conn.execute(text("""
+                    CREATE TABLE post_video_responses (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_id TEXT NOT NULL UNIQUE,
+                        insights_text TEXT,
+                        value_selected TEXT,
+                        value_custom TEXT,
+                        action_selected TEXT,
+                        action_custom TEXT,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
+                conn.execute(text("CREATE INDEX ix_post_video_responses_session_id ON post_video_responses (session_id)"))
+                conn.commit()
+                print("[migration] Created post_video_responses table")
+            
     except Exception as e:
         print(f"[migration] Error running migrations: {e}")
 
@@ -121,6 +234,8 @@ from app.routes.notifications import r as notifications_r
 # CHANGE #10: Admin Console Routes
 from app.routes.admin_auth import r as admin_auth_r
 from app.routes.admin_dashboard import r as admin_dashboard_r
+# ML Video Refactor: Chills tracking routes
+from app.routes.chills import r as chills_r
 
 app.include_router(health_r)
 app.include_router(journey_r)
@@ -147,3 +262,5 @@ app.include_router(notifications_r)
 # CHANGE #10: Admin Console Routers
 app.include_router(admin_auth_r)
 app.include_router(admin_dashboard_r)
+# ML Video Refactor: Chills tracking router
+app.include_router(chills_r)
