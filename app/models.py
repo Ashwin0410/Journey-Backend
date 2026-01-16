@@ -681,6 +681,45 @@ class AdminAuditLog(Base):
 
 
 # =============================================================================
+# STIMULI SUGGESTION MODEL (Required by journey.py video endpoints)
+# =============================================================================
+
+
+class StimuliSuggestion(Base):
+    """
+    Stores ML-predicted video suggestions for users.
+    
+    Created when user completes the ML questionnaire (/api/intake/ml-questionnaire).
+    Used by /api/journey/video-suggestion to serve ranked video recommendations.
+    
+    Day 1 = rank 1 video, Day 2 = rank 2 video, etc.
+    """
+    __tablename__ = "stimuli_suggestions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_hash = Column(String, index=True, nullable=False)
+    
+    # Video identification
+    stimulus_rank = Column(Integer, index=True, nullable=False)  # 1, 2, 3... (maps to journey day)
+    stimulus_name = Column(String, nullable=False)
+    stimulus_url = Column(String, nullable=False)  # YouTube URL
+    stimulus_description = Column(Text, nullable=True)
+    
+    # ML prediction score (higher = better match for user)
+    score = Column(Float, nullable=True)
+    
+    # Link to questionnaire that generated this suggestion
+    questionnaire_id = Column(Integer, nullable=True)
+    
+    # Tracking
+    was_shown = Column(Boolean, default=False)
+    was_watched = Column(Boolean, default=False)
+    was_completed = Column(Boolean, default=False)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+# =============================================================================
 # ML VIDEO REFACTOR MODELS
 # =============================================================================
 
