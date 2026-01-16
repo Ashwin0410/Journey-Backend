@@ -10,7 +10,7 @@ from pydub import AudioSegment
 
 from ..schemas import IntakeIn, GenerateOut
 from ..db import SessionLocal
-from ..models import Sessions, Scripts, Activities, ActivitySessions, Users, MiniCheckins, TherapistPatients, TherapistAIGuidance, PreGeneratedAudio
+from ..models import Sessions, Scripts, Activities, ActivitySessions, Users, MiniCheckins, TherapistPatients, TherapistAIGuidance, PreGeneratedAudio, StimuliSuggestion
 from ..services import prompt as pr
 from ..services import llm
 from ..services import selector as sel
@@ -544,6 +544,215 @@ def get_pre_gen_status(
             "journey_day": None,
             "error": str(e),
         }
+
+
+# =============================================================================
+# NEW: Video Suggestion Endpoint for ML-based video recommendations
+# =============================================================================
+
+
+def _extract_youtube_video_id(url: str) -> Optional[str]:
+    """Extract YouTube video ID from URL."""
+    import re
+    if not url:
+        return None
+    
+    # Pattern for youtu.be/VIDEO_ID
+    match = re.search(r"youtu\.be/([a-zA-Z0-9_-]{11})", url)
+    if match:
+        return match.group(1)
+    
+    # Pattern for youtube.com/watch?v=VIDEO_ID
+    match = re.search(r"youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})", url)
+    if match:
+        return match.group(1)
+    
+    # Pattern for youtube.com/embed/VIDEO_ID
+    match = re.search(r"youtube\.com/embed/([a-zA-Z0-9_-]{11})", url)
+    if match:
+        return match.group(1)
+    
+    return None
+
+
+@r.get("/api/journey/video-suggestion")
+def get_video_suggestion(
+    user_hash: str = Query(..., description="User hash to get video suggestion for"),
+    q: Session = Depends(db),
+):
+    """
+    Get today's video suggestion based on ML predictions.
+    
+    This endpoint returns the video recommendation for the user's current journey day.
+    Day 1 = rank #1 video, Day 2 = rank #2 video, etc.
+    
+    The video suggestions are generated when the user completes the ML questionnaire
+    (/api/intake/ml-questionnaire) and stored in the stimuli_suggestions table.
+    
+    Returns:
+        - has_video: bool - whether a video suggestion is available
+        - journey_day: int - current journey day
+        - video: dict with stimulus_name, stimulus_url, embed_url, description, etc.
+        - session_id: str - new session ID for tracking this video session
+    """
+    try:
+        # Get user
+        user = q.query(Users).filter(Users.user_hash == user_hash).first()
+        if not user:
+            return {
+                "has_video": False,
+                "message": "User not found",
+                "video": None,
+            }
+        
+        journey_day = getattr(user, "journey_day", None) or 1
+        
+        # Get the video suggestion for this day
+        # Day 1 = rank 1, Day 2 = rank 2, etc.
+        suggestion = (
+            q.query(StimuliSuggestion)
+            .filter(
+                StimuliSuggestion.user_hash == user_hash,
+                StimuliSuggestion.stimulus_rank == journey_day,
+            )
+            .first()
+        )
+        
+        # If no exact match, try to get the highest available rank <= journey_day
+        if not suggestion:
+            suggestion = (
+                q.query(StimuliSuggestion)
+                .filter(
+                    StimuliSuggestion.user_hash == user_hash,
+                    StimuliSuggestion.stimulus_rank <= journey_day,
+                )
+                .order_by(StimuliSuggestion.stimulus_rank.desc())
+                .first()
+            )
+        
+        # If still no suggestion, try rank 1 (fallback)
+        if not suggestion:
+            suggestion = (
+                q.query(StimuliSuggestion)
+                .filter(StimuliSuggestion.user_hash == user_hash)
+                .order_by(StimuliSuggestion.stimulus_rank.asc())
+                .first()
+            )
+        
+        if not suggestion:
+            return {
+                "has_video": False,
+                "journey_day": journey_day,
+                "message": "No video suggestions found. Please complete the ML questionnaire first.",
+                "video": None,
+            }
+        
+        # Create a session for tracking this video view
+        session_id = sid()
+        
+        # Create session record for video
+        row = Sessions(
+            id=session_id,
+            user_hash=user_hash,
+            track_id=f"video_{suggestion.stimulus_rank}",
+            voice_id="video",
+            audio_path=suggestion.stimulus_url or "",
+            mood=None,
+            schema_hint=None,
+        )
+        q.add(row)
+        q.commit()
+        
+        # Extract YouTube video ID for embed URL
+        video_id = _extract_youtube_video_id(suggestion.stimulus_url)
+        embed_url = f"https://www.youtube.com/embed/{video_id}" if video_id else None
+        thumbnail_url = f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg" if video_id else None
+        
+        print(f"[journey] Video suggestion for user {user_hash} day {journey_day}: {suggestion.stimulus_name}")
+        
+        return {
+            "has_video": True,
+            "journey_day": journey_day,
+            "session_id": session_id,
+            "video": {
+                "rank": suggestion.stimulus_rank,
+                "stimulus_name": suggestion.stimulus_name,
+                "stimulus_url": suggestion.stimulus_url,
+                "stimulus_description": suggestion.stimulus_description,
+                "score": suggestion.score,
+                "video_id": video_id,
+                "embed_url": embed_url,
+                "thumbnail_url": thumbnail_url,
+            },
+        }
+        
+    except Exception as e:
+        print(f"[journey] Error getting video suggestion: {e}")
+        return {
+            "has_video": False,
+            "message": f"Error: {str(e)}",
+            "video": None,
+        }
+
+
+@r.get("/api/journey/all-video-suggestions")
+def get_all_video_suggestions(
+    user_hash: str = Query(..., description="User hash to get all video suggestions for"),
+    q: Session = Depends(db),
+):
+    """
+    Get all video suggestions for a user.
+    
+    Returns the complete ranked list of video recommendations
+    generated from the ML questionnaire.
+    """
+    try:
+        suggestions = (
+            q.query(StimuliSuggestion)
+            .filter(StimuliSuggestion.user_hash == user_hash)
+            .order_by(StimuliSuggestion.stimulus_rank.asc())
+            .all()
+        )
+        
+        if not suggestions:
+            return {
+                "has_suggestions": False,
+                "message": "No video suggestions found. Please complete the ML questionnaire first.",
+                "suggestions": [],
+            }
+        
+        result = []
+        for s in suggestions:
+            video_id = _extract_youtube_video_id(s.stimulus_url)
+            result.append({
+                "rank": s.stimulus_rank,
+                "stimulus_name": s.stimulus_name,
+                "stimulus_url": s.stimulus_url,
+                "stimulus_description": s.stimulus_description,
+                "score": s.score,
+                "video_id": video_id,
+                "embed_url": f"https://www.youtube.com/embed/{video_id}" if video_id else None,
+                "thumbnail_url": f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg" if video_id else None,
+            })
+        
+        return {
+            "has_suggestions": True,
+            "count": len(result),
+            "suggestions": result,
+        }
+        
+    except Exception as e:
+        print(f"[journey] Error getting all video suggestions: {e}")
+        return {
+            "has_suggestions": False,
+            "message": f"Error: {str(e)}",
+            "suggestions": [],
+        }
+
+
+# =============================================================================
+# EXISTING ENDPOINTS (UNCHANGED)
+# =============================================================================
 
 
 @r.post("/api/journey/generate", response_model=GenerateOut)
