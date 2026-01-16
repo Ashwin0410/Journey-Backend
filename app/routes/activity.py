@@ -25,7 +25,6 @@ r = APIRouter(prefix="/api/journey/activity", tags=["journey-activity"])
 
 
 
-
 def get_db():
     db = SessionLocal()
     try:
@@ -1556,6 +1555,283 @@ def swap_activity(
 # =============================================================================
 
 
+# =============================================================================
+# NEW: Generate activities from post-video action
+# This endpoint uses the user's stated action intention from the video experience
+# =============================================================================
+
+
+def _get_action_from_post_video_response(db: Session, user_hash: str, session_id: Optional[str] = None) -> Optional[str]:
+    """
+    Get the user's action intention from their most recent PostVideoResponse.
+    
+    Priority:
+    1. action_custom (if provided)
+    2. action_selected (if not "Other")
+    
+    Args:
+        db: Database session
+        user_hash: User hash
+        session_id: Optional specific session ID to get action from
+    
+    Returns:
+        Action text to use for activity generation, or None
+    """
+    try:
+        query = db.query(models.PostVideoResponse)
+        
+        if session_id:
+            # Get response for specific session
+            response = query.filter(models.PostVideoResponse.session_id == session_id).first()
+        else:
+            # Get most recent response for this user
+            # Join with Sessions to filter by user_hash
+            response = (
+                query.join(models.Sessions, models.PostVideoResponse.session_id == models.Sessions.id)
+                .filter(models.Sessions.user_hash == user_hash)
+                .order_by(models.PostVideoResponse.created_at.desc())
+                .first()
+            )
+        
+        if not response:
+            return None
+        
+        # Priority: action_custom > action_selected
+        if response.action_custom:
+            return response.action_custom.strip()
+        
+        if response.action_selected and response.action_selected.lower() != "other":
+            return response.action_selected.strip()
+        
+        return None
+        
+    except Exception as e:
+        print(f"[activity] Error getting action from post-video response: {e}")
+        return None
+
+
+def _generate_activities_from_action(
+    db: Session,
+    *,
+    user_hash: str,
+    action_today: str,
+    postal_code: Optional[str] = None,
+    gps_lat: Optional[float] = None,
+    gps_lng: Optional[float] = None,
+    count: int = 6,
+) -> List[schemas.ActivityBase]:
+    """
+    Generate activities based on the user's stated action intention.
+    
+    This is a specialized version of _generate_activities_via_llm that
+    focuses on the user's action_today as the primary input.
+    
+    Args:
+        db: Database session
+        user_hash: User hash
+        action_today: The user's stated action from post-video response
+        postal_code: Optional location hint
+        gps_lat: Optional GPS latitude
+        gps_lng: Optional GPS longitude
+        count: Number of activities to generate
+    
+    Returns:
+        List of generated ActivityBase objects
+    """
+    # Get additional context from user history
+    fb = _fallback_context_from_history(db, user_hash)
+    
+    # Use the action_today as the primary goal
+    return _generate_activities_via_llm(
+        mood=fb.get("mood"),
+        schema_hint=fb.get("schema_hint"),
+        postal_code=postal_code or fb.get("postal_code"),
+        goal_today=action_today,  # Use the action as the goal
+        place=fb.get("place"),
+        count=count,
+        emotion_word=fb.get("emotion_word"),
+        chills_detail=fb.get("chills_detail"),
+        last_insight=fb.get("last_insight"),
+        chills_level=fb.get("chills_level"),
+        life_area=fb.get("life_area"),
+        life_focus=fb.get("life_focus"),
+        week_actions=fb.get("week_actions", []),
+        gps_lat=gps_lat,
+        gps_lng=gps_lng,
+    )
+
+
+@r.post(
+    "/from-action",
+    response_model=schemas.ActivityRecommendationListOut,
+    summary="Generate activities from post-video action",
+)
+def generate_from_action(
+    payload: schemas.ActivityFromActionIn,
+    db: Session = Depends(get_db),
+):
+    """
+    Generate activities based on the user's action intention from the video experience.
+    
+    This endpoint is called after the user completes the video watching flow
+    and has entered their action intention (e.g., "Call someone", "Go outside").
+    
+    The action can be provided directly in the request or retrieved from the
+    user's most recent PostVideoResponse.
+    
+    Flow:
+    1. User watches video
+    2. User enters post-video response with action intention
+    3. Frontend calls this endpoint with the action
+    4. Activities are generated based on the action
+    5. User selects and does an activity
+    
+    Request:
+        - user_hash: Required
+        - action_today: Optional - if not provided, fetched from PostVideoResponse
+        - session_id: Optional - specific session to get action from
+        - gps_lat/gps_lng: Optional - for location-based activities
+    
+    Returns:
+        List of 6 activities tailored to the user's stated action
+    """
+    user_hash = payload.user_hash
+    action_today = payload.action_today
+    session_id = getattr(payload, 'session_id', None)
+    gps_lat = getattr(payload, 'gps_lat', None)
+    gps_lng = getattr(payload, 'gps_lng', None)
+    
+    if not user_hash:
+        raise HTTPException(status_code=400, detail="user_hash is required")
+    
+    # If no action provided, try to get it from PostVideoResponse
+    if not action_today:
+        action_today = _get_action_from_post_video_response(db, user_hash, session_id)
+    
+    if not action_today:
+        # Fallback to a generic action if none found
+        action_today = "do something meaningful today"
+        print(f"[activity] No action found for user {user_hash}, using fallback")
+    
+    print(f"[activity] /from-action called for user {user_hash}, action='{action_today}'")
+    
+    # Get postal code from user if not provided via GPS
+    postal_code = None
+    if gps_lat is None or gps_lng is None:
+        try:
+            user = db.query(models.Users).filter(models.Users.user_hash == user_hash).first()
+            if user and getattr(user, 'postal_code', None):
+                postal_code = user.postal_code
+        except Exception:
+            pass
+    
+    # Generate activities
+    generated = _generate_activities_from_action(
+        db,
+        user_hash=user_hash,
+        action_today=action_today,
+        postal_code=postal_code,
+        gps_lat=gps_lat,
+        gps_lng=gps_lng,
+        count=6,
+    )
+    
+    if not generated:
+        raise HTTPException(status_code=500, detail="Failed to generate activities")
+    
+    # Store activities
+    rows = _store_generated_activities(db, activities=generated, user_hash=user_hash)
+    
+    # Get therapist activities if any
+    therapist_activity_outs: List[schemas.ActivityRecommendationOut] = []
+    therapist_activities = _get_therapist_suggested_activities_for_patient(db, user_hash)
+    if therapist_activities:
+        therapist_activity_outs = [_therapist_activity_to_out(ta) for ta in therapist_activities]
+    
+    # Convert to output format
+    if rows:
+        recs: List[schemas.ActivityRecommendationOut] = [_to_activity_out(a) for a in rows]
+    else:
+        # Fallback if storage failed
+        recs = []
+        for idx, act in enumerate(generated):
+            recs.append(schemas.ActivityRecommendationOut(
+                id=-(idx + 2000),
+                title=act.title,
+                description=act.description or "",
+                life_area=act.life_area,
+                effort_level=act.effort_level,
+                reward_type=act.reward_type,
+                default_duration_min=act.default_duration_min,
+                location_label=act.location_label,
+                tags=act.tags or [],
+                user_hash=None,
+                lat=act.lat,
+                lng=act.lng,
+                place_id=act.place_id,
+            ))
+    
+    # Add therapist activities
+    recs.extend(therapist_activity_outs)
+    
+    # Commit the first activity as the user's current activity
+    if rows and user_hash:
+        try:
+            _commit_activity(db, user_hash=user_hash, activity_id=rows[0].id)
+            print(f"[activity] Committed first activity '{rows[0].title}' for user {user_hash}")
+        except Exception as e:
+            print(f"[activity] Failed to commit first activity: {e}")
+    
+    return schemas.ActivityRecommendationListOut(activities=recs)
+
+
+@r.get(
+    "/action-for-session/{session_id}",
+    summary="Get action from post-video response for a session",
+)
+def get_action_for_session(
+    session_id: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Get the action text from a session's post-video response.
+    
+    This is useful for debugging or for the frontend to confirm
+    what action was captured.
+    """
+    response = (
+        db.query(models.PostVideoResponse)
+        .filter(models.PostVideoResponse.session_id == session_id)
+        .first()
+    )
+    
+    if not response:
+        return {
+            "has_action": False,
+            "action": None,
+            "source": None,
+            "session_id": session_id,
+        }
+    
+    # Get the action
+    action = None
+    source = None
+    
+    if response.action_custom:
+        action = response.action_custom.strip()
+        source = "custom"
+    elif response.action_selected and response.action_selected.lower() != "other":
+        action = response.action_selected.strip()
+        source = "selected"
+    
+    return {
+        "has_action": action is not None,
+        "action": action,
+        "source": source,
+        "session_id": session_id,
+        "action_selected": response.action_selected,
+        "action_custom": response.action_custom,
+    }
 @r.get(
     "/{activity_id}",
     response_model=schemas.ActivityOut,
