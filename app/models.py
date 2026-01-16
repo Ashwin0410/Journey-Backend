@@ -678,3 +678,216 @@ class AdminAuditLog(Base):
     user_agent = Column(String, nullable=True)
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+# =============================================================================
+# ML VIDEO REFACTOR MODELS
+# =============================================================================
+
+
+class MLQuestionnaire(Base):
+    """
+    ML Video Refactor: Stores user responses to the ML questionnaire.
+    
+    The questionnaire collects data for the ML personalization system including:
+    - DPES (Dispositional Positive Emotion Scale) items
+    - NEO-FFI (Openness to Experience) items  
+    - KAMF (Absorption/Music-induced chills) items
+    
+    Responses are stored as JSON for flexibility as questions may evolve.
+    """
+    __tablename__ = "ml_questionnaires"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_hash = Column(String, index=True, nullable=False)
+    
+    # All answers stored as JSON: [{"question_code": "DPES_1", "value": 5}, ...]
+    answers_json = Column(Text, nullable=False)
+    
+    # Computed scores (cached for quick access)
+    dpes_awe_score = Column(Float, nullable=True)  # Awe subscale
+    dpes_joy_score = Column(Float, nullable=True)  # Joy subscale
+    neo_openness_score = Column(Float, nullable=True)  # Openness to Experience
+    kamf_absorption_score = Column(Float, nullable=True)  # Absorption in music
+    
+    # Completion status
+    complete = Column(Boolean, default=False, index=True)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class VideoStimulus(Base):
+    """
+    ML Video Refactor: Catalog of available video stimuli.
+    
+    Stores metadata about videos that can be suggested to users.
+    Videos are matched to users based on their ML questionnaire responses.
+    """
+    __tablename__ = "video_stimuli"
+
+    id = Column(Integer, primary_key=True, index=True)
+    
+    # Video identification
+    stimulus_name = Column(String, nullable=False)
+    stimulus_description = Column(Text, nullable=True)
+    
+    # Video URLs
+    stimulus_url = Column(String, nullable=False)  # YouTube URL or embed URL
+    embed_url = Column(String, nullable=True)  # Direct embed URL if different
+    thumbnail_url = Column(String, nullable=True)
+    
+    # Video metadata
+    duration_seconds = Column(Integer, nullable=True)
+    category = Column(String, index=True, nullable=True)  # nature, music, speech, etc.
+    tags_json = Column(Text, nullable=True)  # ["uplifting", "orchestral", "cinematic"]
+    
+    # ML matching features (for personalization algorithm)
+    # These scores help match videos to user profiles
+    awe_potential = Column(Float, nullable=True)  # 0-1 score for awe-inducing potential
+    emotional_valence = Column(Float, nullable=True)  # -1 to 1 (negative to positive)
+    arousal_level = Column(Float, nullable=True)  # 0-1 (calm to exciting)
+    
+    # Usage stats
+    times_shown = Column(Integer, default=0)
+    times_completed = Column(Integer, default=0)
+    avg_chills_count = Column(Float, nullable=True)
+    
+    # Status
+    is_active = Column(Boolean, default=True, index=True)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class VideoSession(Base):
+    """
+    ML Video Refactor: Tracks individual video watching sessions.
+    
+    Created when a user starts watching a video, updated as they interact.
+    Links to chills timestamps, body map data, and post-video responses.
+    """
+    __tablename__ = "video_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(String, unique=True, index=True, nullable=False)  # Client-generated UUID
+    user_hash = Column(String, index=True, nullable=False)
+    video_id = Column(Integer, ForeignKey("video_stimuli.id"), index=True, nullable=False)
+    
+    # Session timing
+    started_at = Column(DateTime(timezone=True), server_default=func.now())
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    
+    # Viewing data
+    watched_duration_seconds = Column(Float, nullable=True)
+    completed = Column(Boolean, default=False)
+    
+    # Aggregated chills data (updated after session)
+    chills_count = Column(Integer, default=0)
+    body_map_spots = Column(Integer, default=0)
+    
+    # Post-video response submitted
+    has_response = Column(Boolean, default=False)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class ChillsTimestamp(Base):
+    """
+    ML Video Refactor: Records individual chills moments during video playback.
+    
+    Each time a user presses the chills button, a timestamp is recorded.
+    Multiple timestamps can exist per session.
+    """
+    __tablename__ = "chills_timestamps"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(String, ForeignKey("video_sessions.session_id"), index=True, nullable=False)
+    user_hash = Column(String, index=True, nullable=True)
+    
+    # Time in the video when chills occurred (seconds)
+    video_time_seconds = Column(Float, nullable=False)
+    
+    # Optional: intensity if we add a slider later
+    intensity = Column(Integer, nullable=True)  # 1-5 scale
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class ChillsBodyMap(Base):
+    """
+    ML Video Refactor: Stores body map data from post-video check-in.
+    
+    Users can mark where they felt sensations on a body diagram.
+    Spots are stored as JSON array of {x_percent, y_percent} coordinates.
+    """
+    __tablename__ = "chills_body_maps"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(String, ForeignKey("video_sessions.session_id"), index=True, nullable=False)
+    user_hash = Column(String, index=True, nullable=True)
+    
+    # Body map spots as JSON: [{"x_percent": 50.0, "y_percent": 30.0}, ...]
+    spots_json = Column(Text, nullable=False)
+    spot_count = Column(Integer, default=0)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class ChillsResponse(Base):
+    """
+    ML Video Refactor: Stores post-video response data.
+    
+    After watching a video and optionally marking body sensations,
+    users complete a 3-step form: Insights -> Value -> Action.
+    """
+    __tablename__ = "chills_responses"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(String, ForeignKey("video_sessions.session_id"), unique=True, index=True, nullable=False)
+    user_hash = Column(String, index=True, nullable=True)
+    
+    # Step 1: Insights
+    insights_text = Column(Text, nullable=True)  # "What stood out to you?"
+    
+    # Step 2: Value selection
+    value_selected = Column(String, nullable=True)  # Connection, Growth, Peace, etc.
+    value_custom = Column(String, nullable=True)  # If "Other" was selected
+    
+    # Step 3: Action commitment
+    action_selected = Column(String, nullable=True)  # Predefined action
+    action_custom = Column(String, nullable=True)  # If "Other" was selected
+    
+    # Computed field for convenience
+    action_today = Column(String, nullable=True)  # Final action (selected or custom)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class VideoSuggestionLog(Base):
+    """
+    ML Video Refactor: Logs video suggestions for analysis and debugging.
+    
+    Tracks which videos were suggested to users and why,
+    enabling analysis of the recommendation algorithm.
+    """
+    __tablename__ = "video_suggestion_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_hash = Column(String, index=True, nullable=False)
+    video_id = Column(Integer, ForeignKey("video_stimuli.id"), index=True, nullable=False)
+    
+    # Why this video was suggested
+    suggestion_reason = Column(String, nullable=True)  # "high_awe_match", "new_user_default", etc.
+    match_score = Column(Float, nullable=True)  # 0-1 score from ML algorithm
+    
+    # User response
+    was_watched = Column(Boolean, default=False)
+    was_completed = Column(Boolean, default=False)
+    chills_count = Column(Integer, nullable=True)
+    
+    # Context
+    journey_day = Column(Integer, nullable=True)
+    questionnaire_id = Column(Integer, ForeignKey("ml_questionnaires.id"), nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
