@@ -814,6 +814,210 @@ class ResourceListOut(BaseModel):
 
 
 # ============================================================================
+
+# =============================================================================
+# ML VIDEO REFACTOR SCHEMAS
+# =============================================================================
+
+
+# --- ML Questionnaire Schemas ---
+
+class MLQuestionnaireAnswerIn(BaseModel):
+    """Single answer in the ML questionnaire."""
+    question_code: str  # e.g., "DPES_1", "NEO-FFI_10", "KAMF_4_1"
+    value: int  # Numeric response (scale depends on question)
+
+
+class MLQuestionnaireIn(BaseModel):
+    """Schema for submitting ML questionnaire answers."""
+    user_hash: str
+    answers: List[MLQuestionnaireAnswerIn]
+
+
+class MLQuestionnaireOut(BaseModel):
+    """Schema for ML questionnaire submission response."""
+    questionnaire_id: int
+    user_hash: str
+    complete: bool
+    suggestions: List[Dict[str, Any]] = []  # Video suggestions based on answers
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class MLQuestionnaireStatusOut(BaseModel):
+    """Schema for checking ML questionnaire completion status."""
+    complete: bool
+    questionnaire_id: Optional[int] = None
+    completed_at: Optional[datetime] = None
+
+
+# --- Video Suggestion Schemas ---
+
+class VideoStimulusOut(BaseModel):
+    """Schema for a video stimulus."""
+    video_id: int
+    stimulus_name: str
+    stimulus_description: Optional[str] = None
+    stimulus_url: str
+    embed_url: Optional[str] = None
+    duration_seconds: Optional[int] = None
+    category: Optional[str] = None
+    tags: List[str] = []
+
+    class Config:
+        from_attributes = True
+
+
+class VideoSuggestionOut(BaseModel):
+    """Schema for video suggestion response."""
+    has_video: bool
+    video: Optional[VideoStimulusOut] = None
+    journey_day: Optional[int] = None
+    reason: Optional[str] = None  # Why this video was suggested
+
+
+class VideoSuggestionListOut(BaseModel):
+    """Schema for multiple video suggestions."""
+    suggestions: List[VideoStimulusOut]
+    journey_day: Optional[int] = None
+
+
+# --- Chills Tracking Schemas ---
+
+class ChillsTimestampIn(BaseModel):
+    """Schema for recording a chills timestamp during video playback."""
+    session_id: str
+    video_time_seconds: float  # Time in the video when chills occurred
+    user_hash: Optional[str] = None
+
+
+class ChillsTimestampOut(BaseModel):
+    """Schema for chills timestamp response."""
+    id: int
+    session_id: str
+    video_time_seconds: float
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class BodyMapSpotIn(BaseModel):
+    """Schema for a single body map spot."""
+    x_percent: float  # X position as percentage (0-100)
+    y_percent: float  # Y position as percentage (0-100)
+
+
+class BodyMapIn(BaseModel):
+    """Schema for submitting body map data."""
+    session_id: str
+    spots: List[BodyMapSpotIn]
+    user_hash: Optional[str] = None
+
+
+class BodyMapOut(BaseModel):
+    """Schema for body map response."""
+    id: int
+    session_id: str
+    spot_count: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ChillsResponseIn(BaseModel):
+    """Schema for post-video chills response (insights, value, action)."""
+    session_id: str
+    insights_text: Optional[str] = None  # "What stood out to you?"
+    value_selected: Optional[str] = None  # Selected value (Connection, Growth, etc.)
+    value_custom: Optional[str] = None  # Custom value if "Other" selected
+    action_selected: Optional[str] = None  # Selected action
+    action_custom: Optional[str] = None  # Custom action if "Other" selected
+    user_hash: Optional[str] = None
+
+
+class ChillsResponseOut(BaseModel):
+    """Schema for chills response output."""
+    id: int
+    session_id: str
+    insights_text: Optional[str] = None
+    value_selected: Optional[str] = None
+    action_today: Optional[str] = None  # Final action (selected or custom)
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ChillsSessionSummaryOut(BaseModel):
+    """Schema for complete chills session summary."""
+    session_id: str
+    video_id: Optional[int] = None
+    video_name: Optional[str] = None
+    chills_count: int
+    chills_timestamps: List[float]  # List of video times
+    body_map_spots: int
+    response: Optional[ChillsResponseOut] = None
+    created_at: datetime
+
+
+# --- Activity From Action Schemas ---
+
+class ActivityFromActionIn(BaseModel):
+    """Schema for generating activities from post-video action."""
+    user_hash: str
+    action_today: str  # The action the user committed to
+    session_id: Optional[str] = None  # Video session ID
+    value_selected: Optional[str] = None  # The value that resonated
+
+
+class ActivityFromActionOut(BaseModel):
+    """Schema for activities generated from action."""
+    activities: List[ActivityRecommendationOut]
+    action_source: str  # Original action text
+    value_source: Optional[str] = None
+
+
+# --- Video Session Schemas ---
+
+class VideoSessionIn(BaseModel):
+    """Schema for starting a video session."""
+    user_hash: str
+    video_id: int
+    session_id: Optional[str] = None  # Client-generated session ID
+
+
+class VideoSessionOut(BaseModel):
+    """Schema for video session response."""
+    session_id: str
+    video_id: int
+    video: VideoStimulusOut
+    started_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class VideoSessionCompleteIn(BaseModel):
+    """Schema for completing a video session."""
+    session_id: str
+    watched_duration_seconds: float
+    completed: bool = True
+    user_hash: Optional[str] = None
+
+
+class VideoSessionCompleteOut(BaseModel):
+    """Schema for video session completion response."""
+    session_id: str
+    watched_duration_seconds: float
+    chills_count: int
+    body_map_spots: int
+    has_response: bool
+
+
 # ADMIN CONSOLE SCHEMAS (Change 10)
 # ============================================================================
 
