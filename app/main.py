@@ -67,9 +67,27 @@ def run_migrations():
             # Check if index exists
             result = conn.execute(text("SELECT name FROM sqlite_master WHERE type='index' AND name='ix_activities_user_hash'"))
             if not result.fetchone():
-                conn.execute(text("CREATE INDEX ix_activities_user_hash ON activities (user_hash)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_activities_user_hash ON activities (user_hash)"))
                 conn.commit()
                 print("[migration] Created index ix_activities_user_hash")
+            
+            # Add action_intention column if missing
+            if 'action_intention' not in columns:
+                conn.execute(text("ALTER TABLE activities ADD COLUMN action_intention TEXT"))
+                conn.commit()
+                print("[migration] Added action_intention column to activities table")
+            
+            # Add source_type column if missing
+            if 'source_type' not in columns:
+                conn.execute(text("ALTER TABLE activities ADD COLUMN source_type TEXT"))
+                conn.commit()
+                print("[migration] Added source_type column to activities table")
+            
+            # Add video_session_id column if missing
+            if 'video_session_id' not in columns:
+                conn.execute(text("ALTER TABLE activities ADD COLUMN video_session_id TEXT"))
+                conn.commit()
+                print("[migration] Added video_session_id column to activities table")
             
             # -----------------------------------------------------------------
             # Migration 2: Add deleted_at column to users table (Soft Delete)
@@ -85,90 +103,151 @@ def run_migrations():
             # Check if index exists for deleted_at
             result = conn.execute(text("SELECT name FROM sqlite_master WHERE type='index' AND name='ix_users_deleted_at'"))
             if not result.fetchone():
-                conn.execute(text("CREATE INDEX ix_users_deleted_at ON users (deleted_at)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_deleted_at ON users (deleted_at)"))
                 conn.commit()
                 print("[migration] Created index ix_users_deleted_at")
             
-            # -----------------------------------------------------------------
-            # Migration 3: Create ML-related tables for video recommendations
-            # -----------------------------------------------------------------
-            # Check if ml_questionnaire_responses table exists
-            result = conn.execute(text(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='ml_questionnaire_responses'"
-            ))
-            if not result.fetchone():
-                conn.execute(text("""
-                    CREATE TABLE ml_questionnaire_responses (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        user_hash TEXT NOT NULL,
-                        question_code TEXT NOT NULL,
-                        response_value TEXT,
-                        response_numeric REAL,
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                    )
-                """))
-                conn.execute(text("CREATE INDEX ix_ml_questionnaire_user_hash ON ml_questionnaire_responses (user_hash)"))
-                conn.commit()
-                print("[migration] Created ml_questionnaire_responses table")
-            
-            # Check if stimuli_suggestions table exists
-            result = conn.execute(text(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='stimuli_suggestions'"
-            ))
-            if not result.fetchone():
-                conn.execute(text("""
-                    CREATE TABLE stimuli_suggestions (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        user_hash TEXT NOT NULL,
-                        stimulus_rank INTEGER NOT NULL,
-                        stimulus_name TEXT NOT NULL,
-                        stimulus_url TEXT,
-                        stimulus_description TEXT,
-                        score REAL,
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                    )
-                """))
-                conn.execute(text("CREATE INDEX ix_stimuli_suggestions_user_hash ON stimuli_suggestions (user_hash)"))
-                conn.execute(text("CREATE INDEX ix_stimuli_suggestions_rank ON stimuli_suggestions (user_hash, stimulus_rank)"))
-                conn.commit()
-                print("[migration] Created stimuli_suggestions table")
-            
-            # Check if ml_questionnaire_complete column exists in users
-            result = conn.execute(text("PRAGMA table_info(users)"))
-            user_columns = [row[1] for row in result.fetchall()]
-            
+            # Add ml_questionnaire_complete column if missing
             if 'ml_questionnaire_complete' not in user_columns:
                 conn.execute(text("ALTER TABLE users ADD COLUMN ml_questionnaire_complete BOOLEAN DEFAULT 0"))
                 conn.commit()
                 print("[migration] Added ml_questionnaire_complete column to users table")
             
             # -----------------------------------------------------------------
-            # Migration 4: Create chills tracking tables
+            # Migration 3: Create/Fix ML Questionnaire Responses table
+            # The model expects individual columns for each question, NOT generic rows
             # -----------------------------------------------------------------
-            # Check if chills_timestamps table exists
+            result = conn.execute(text(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='ml_questionnaire_responses'"
+            ))
+            table_exists = result.fetchone() is not None
+            
+            needs_recreate = False
+            if table_exists:
+                # Check if table has the CORRECT schema (individual question columns)
+                result = conn.execute(text("PRAGMA table_info(ml_questionnaire_responses)"))
+                existing_cols = [row[1] for row in result.fetchall()]
+                # If it has the old wrong schema (question_code), we need to recreate
+                if 'question_code' in existing_cols or 'dpes_1' not in existing_cols:
+                    needs_recreate = True
+                    print("[migration] ml_questionnaire_responses has wrong schema, will recreate")
+            
+            if not table_exists or needs_recreate:
+                # Drop old table if exists (it had wrong schema)
+                if needs_recreate:
+                    conn.execute(text("DROP TABLE IF EXISTS ml_questionnaire_responses"))
+                    conn.commit()
+                    print("[migration] Dropped old ml_questionnaire_responses table")
+                
+                # Create with CORRECT schema matching MLQuestionnaireResponse model
+                conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS ml_questionnaire_responses (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_hash TEXT NOT NULL,
+                        dpes_1 INTEGER,
+                        dpes_4 INTEGER,
+                        dpes_29 INTEGER,
+                        neo_ffi_10 INTEGER,
+                        neo_ffi_14 INTEGER,
+                        neo_ffi_16 INTEGER,
+                        neo_ffi_45 INTEGER,
+                        neo_ffi_46 INTEGER,
+                        kamf_4_1 INTEGER,
+                        age TEXT,
+                        gender TEXT,
+                        ethnicity TEXT,
+                        education TEXT,
+                        depression_status TEXT,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME
+                    )
+                """))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_ml_questionnaire_responses_user_hash ON ml_questionnaire_responses (user_hash)"))
+                conn.commit()
+                print("[migration] Created ml_questionnaire_responses table with correct schema")
+            
+            # -----------------------------------------------------------------
+            # Migration 4: Create/Fix Stimuli Suggestions table
+            # -----------------------------------------------------------------
+            result = conn.execute(text(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='stimuli_suggestions'"
+            ))
+            table_exists = result.fetchone() is not None
+            
+            if not table_exists:
+                conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS stimuli_suggestions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_hash TEXT NOT NULL,
+                        stimulus_rank INTEGER NOT NULL,
+                        stimulus_name TEXT NOT NULL,
+                        stimulus_url TEXT NOT NULL,
+                        stimulus_description TEXT,
+                        score REAL,
+                        questionnaire_id INTEGER,
+                        was_shown BOOLEAN DEFAULT 0,
+                        was_watched BOOLEAN DEFAULT 0,
+                        was_completed BOOLEAN DEFAULT 0,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_stimuli_suggestions_user_hash ON stimuli_suggestions (user_hash)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_stimuli_suggestions_rank ON stimuli_suggestions (user_hash, stimulus_rank)"))
+                conn.commit()
+                print("[migration] Created stimuli_suggestions table")
+            else:
+                # Add missing columns to existing table
+                result = conn.execute(text("PRAGMA table_info(stimuli_suggestions)"))
+                stim_cols = [row[1] for row in result.fetchall()]
+                
+                if 'questionnaire_id' not in stim_cols:
+                    conn.execute(text("ALTER TABLE stimuli_suggestions ADD COLUMN questionnaire_id INTEGER"))
+                    conn.commit()
+                    print("[migration] Added questionnaire_id column to stimuli_suggestions")
+                
+                if 'was_shown' not in stim_cols:
+                    conn.execute(text("ALTER TABLE stimuli_suggestions ADD COLUMN was_shown BOOLEAN DEFAULT 0"))
+                    conn.commit()
+                    print("[migration] Added was_shown column to stimuli_suggestions")
+                
+                if 'was_watched' not in stim_cols:
+                    conn.execute(text("ALTER TABLE stimuli_suggestions ADD COLUMN was_watched BOOLEAN DEFAULT 0"))
+                    conn.commit()
+                    print("[migration] Added was_watched column to stimuli_suggestions")
+                
+                if 'was_completed' not in stim_cols:
+                    conn.execute(text("ALTER TABLE stimuli_suggestions ADD COLUMN was_completed BOOLEAN DEFAULT 0"))
+                    conn.commit()
+                    print("[migration] Added was_completed column to stimuli_suggestions")
+            
+            # -----------------------------------------------------------------
+            # Migration 5: Create chills_timestamps table
+            # -----------------------------------------------------------------
             result = conn.execute(text(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='chills_timestamps'"
             ))
             if not result.fetchone():
                 conn.execute(text("""
-                    CREATE TABLE chills_timestamps (
+                    CREATE TABLE IF NOT EXISTS chills_timestamps (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         session_id TEXT NOT NULL,
                         video_time_seconds REAL NOT NULL,
                         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                     )
                 """))
-                conn.execute(text("CREATE INDEX ix_chills_timestamps_session_id ON chills_timestamps (session_id)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_chills_timestamps_session_id ON chills_timestamps (session_id)"))
                 conn.commit()
                 print("[migration] Created chills_timestamps table")
             
-            # Check if body_map_spots table exists
+            # -----------------------------------------------------------------
+            # Migration 6: Create body_map_spots table
+            # -----------------------------------------------------------------
             result = conn.execute(text(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='body_map_spots'"
             ))
             if not result.fetchone():
                 conn.execute(text("""
-                    CREATE TABLE body_map_spots (
+                    CREATE TABLE IF NOT EXISTS body_map_spots (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         session_id TEXT NOT NULL,
                         x_percent REAL NOT NULL,
@@ -176,34 +255,72 @@ def run_migrations():
                         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                     )
                 """))
-                conn.execute(text("CREATE INDEX ix_body_map_spots_session_id ON body_map_spots (session_id)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_body_map_spots_session_id ON body_map_spots (session_id)"))
                 conn.commit()
                 print("[migration] Created body_map_spots table")
             
-            # Check if post_video_responses table exists
+            # -----------------------------------------------------------------
+            # Migration 7: Create/Fix post_video_responses table
+            # -----------------------------------------------------------------
             result = conn.execute(text(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='post_video_responses'"
             ))
-            if not result.fetchone():
+            table_exists = result.fetchone() is not None
+            
+            if not table_exists:
                 conn.execute(text("""
-                    CREATE TABLE post_video_responses (
+                    CREATE TABLE IF NOT EXISTS post_video_responses (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         session_id TEXT NOT NULL UNIQUE,
+                        user_hash TEXT,
                         insights_text TEXT,
                         value_selected TEXT,
                         value_custom TEXT,
                         action_selected TEXT,
                         action_custom TEXT,
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                     )
                 """))
-                conn.execute(text("CREATE INDEX ix_post_video_responses_session_id ON post_video_responses (session_id)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_post_video_responses_session_id ON post_video_responses (session_id)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_post_video_responses_user_hash ON post_video_responses (user_hash)"))
                 conn.commit()
                 print("[migration] Created post_video_responses table")
+            else:
+                # Add user_hash column if missing
+                result = conn.execute(text("PRAGMA table_info(post_video_responses)"))
+                pvr_cols = [row[1] for row in result.fetchall()]
+                
+                if 'user_hash' not in pvr_cols:
+                    conn.execute(text("ALTER TABLE post_video_responses ADD COLUMN user_hash TEXT"))
+                    conn.commit()
+                    print("[migration] Added user_hash column to post_video_responses")
+            
+            # -----------------------------------------------------------------
+            # Migration 8: Create ml_questionnaires table (if model uses it)
+            # -----------------------------------------------------------------
+            result = conn.execute(text(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='ml_questionnaires'"
+            ))
+            if not result.fetchone():
+                conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS ml_questionnaires (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_hash TEXT NOT NULL,
+                        responses_json TEXT,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME
+                    )
+                """))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_ml_questionnaires_user_hash ON ml_questionnaires (user_hash)"))
+                conn.commit()
+                print("[migration] Created ml_questionnaires table")
+            
+            print("[migration] All migrations completed successfully")
             
     except Exception as e:
         print(f"[migration] Error running migrations: {e}")
+        import traceback
+        traceback.print_exc()
 
 run_migrations()
 # =============================================================================
