@@ -514,237 +514,6 @@ def _generate_activities_via_llm(
 
 
 # =============================================================================
-# NEW: Generate 3 BA activities + 3 place-based activities from action intention
-# This is the new flow for video-based activity generation
-# =============================================================================
-
-def _generate_ba_and_place_based_activities(
-    *,
-    action_intention: str,
-    value_selected: Optional[str] = None,
-    postal_code: Optional[str] = None,
-    gps_lat: Optional[float] = None,
-    gps_lng: Optional[float] = None,
-    emotion_word: Optional[str] = None,
-    chills_detail: Optional[str] = None,
-    last_insight: Optional[str] = None,
-) -> Tuple[List[schemas.ActivityBase], List[schemas.ActivityBase]]:
-    """
-    Generate 3 BA (Behavioural Activation) activities + 3 place-based activities
-    based on the user's action intention from the video experience.
-    
-    BA activities:
-    - Direct variations of the user's stated action
-    - Can be done anywhere (at home, etc.)
-    - Focus on the core behavioral goal
-    
-    Place-based activities:
-    - Same action intention but at a specific nearby place
-    - Uses Google Maps places for real locations
-    - Encourages getting out and doing the action in a new context
-    
-    Args:
-        action_intention: The user's stated action (e.g., "Call my mom")
-        value_selected: The value that resonated with the user
-        postal_code: Optional location for place-based activities
-        gps_lat/gps_lng: Optional GPS coordinates
-        emotion_word: Emotion from video response
-        chills_detail: What triggered the emotional response
-        last_insight: User's reflection/insight
-    
-    Returns:
-        Tuple of (ba_activities, place_based_activities)
-    """
-    # Get nearby places for place-based activities
-    coords: Optional[Tuple[float, float]] = None
-    all_nearby_places: List[PlaceDetail] = []
-    
-    if gps_lat is not None and gps_lng is not None:
-        coords = (gps_lat, gps_lng)
-    elif postal_code:
-        coords = _geocode_postal_code(postal_code)
-    
-    if coords:
-        lat, lng = coords
-        # Fetch places for place-based activities
-        nearby_parks = _nearby_places(lat, lng, "park", max_results=3)
-        nearby_cafes = _nearby_places(lat, lng, "cafe", max_results=3)
-        nearby_restaurants = _nearby_places(lat, lng, "restaurant", max_results=3)
-        nearby_libraries = _nearby_places(lat, lng, "library", max_results=2)
-        nearby_malls = _nearby_places(lat, lng, "shopping_mall", max_results=2)
-        
-        all_nearby_places = nearby_parks + nearby_cafes + nearby_restaurants + nearby_libraries + nearby_malls
-    
-    # Build context for LLM
-    context_parts = [f"User's action intention: \"{action_intention}\""]
-    if value_selected:
-        context_parts.append(f"Value that resonated: {value_selected}")
-    if emotion_word:
-        context_parts.append(f"Emotion felt: {emotion_word}")
-    if last_insight:
-        insight_short = last_insight[:100] + "..." if len(last_insight) > 100 else last_insight
-        context_parts.append(f"User's insight: {insight_short}")
-    
-    place_names = _get_place_names(all_nearby_places) if all_nearby_places else []
-    if place_names:
-        context_parts.append(f"Nearby places: {', '.join(place_names[:10])}")
-    
-    context_text = "\n".join(context_parts)
-    
-    # System message for generating both types of activities
-    system_msg = """You are a behavioural activation coach for a mental health app.
-
-The user has just watched an emotionally resonant video and stated an action they want to take.
-Generate TWO TYPES of activities based on their action intention:
-
-TYPE 1 - BA ACTIVITIES (3 activities):
-- Direct variations of the user's stated action
-- Can be done anywhere (home, etc.) - no specific location required
-- Different effort levels (easy 5min, medium 15min, longer 30min)
-- Focus on making the action achievable in small steps
-- Tags should include "+ ActionBased"
-
-TYPE 2 - PLACE-BASED ACTIVITIES (3 activities):
-- The SAME action intention but done at a specific nearby place
-- MUST use exact place names from the provided nearby places list
-- Combines the user's action with getting out to a real location
-- Tags should include "+ PlaceBased"
-
-Example: If action is "Call my mom"
-- BA: "5-min voice message to mom", "Send mom a thinking-of-you text", "Schedule a longer call for weekend"
-- Place-based: "Walk to Central Park while calling mom", "Call mom from Starbucks with a coffee", "Video call mom from the library's quiet corner"
-"""
-
-    user_msg = f"""{context_text}
-
-Generate EXACTLY 3 BA activities and 3 place-based activities.
-
-Return ONLY JSON in this exact format:
-{{
-  "ba_activities": [
-    {{
-      "title": "short action-focused name",
-      "description": "2-3 sentences about how to do this variation of the action",
-      "life_area": "Connection | Movement | Creative | Self-compassion | Work",
-      "effort_level": "low | medium | high",
-      "reward_type": "calm | connection | mastery | movement | other",
-      "default_duration_min": 5,
-      "location_label": "At home" or "Anywhere comfortable",
-      "tags": ["+ ActionBased", "relevant BA flavour"]
-    }}
-  ],
-  "place_based_activities": [
-    {{
-      "title": "action at specific place",
-      "description": "2-3 sentences combining the action with the place",
-      "life_area": "Connection | Movement | Creative | Self-compassion | Work",
-      "effort_level": "low | medium | high",
-      "reward_type": "calm | connection | mastery | movement | other",
-      "default_duration_min": 15,
-      "location_label": "EXACT place name from nearby places list",
-      "tags": ["+ PlaceBased", "relevant BA flavour"]
-    }}
-  ]
-}}"""
-
-    try:
-        resp = client.chat.completions.create(
-            model=OPENAI_ACTIVITY_MODEL,
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=0.7,
-        )
-        
-        content = resp.choices[0].message.content
-        data = json.loads(content)
-        
-        ba_items = data.get("ba_activities") or []
-        place_items = data.get("place_based_activities") or []
-        
-    except Exception as e:
-        print(f"[activity] Error generating BA+place activities: {e}")
-        # Return empty lists on error - caller will handle fallback
-        return [], []
-    
-    # Convert BA activities
-    ba_activities: List[schemas.ActivityBase] = []
-    for item in ba_items[:3]:
-        try:
-            tags = item.get("tags") or []
-            if not any("+ ActionBased" in str(t) for t in tags):
-                tags.append("+ ActionBased")
-            
-            act = schemas.ActivityBase(
-                title=(item.get("title") or "").strip() or "Small step",
-                description=(item.get("description") or "").strip() or "Take a small step toward your intention.",
-                life_area=item.get("life_area", "Connection"),
-                effort_level=item.get("effort_level", "low"),
-                reward_type=item.get("reward_type", "connection"),
-                default_duration_min=item.get("default_duration_min") or 10,
-                location_label=item.get("location_label") or "Anywhere",
-                tags=tags,
-                lat=None,  # BA activities don't have specific coordinates
-                lng=None,
-                place_id=None,
-            )
-            ba_activities.append(act)
-        except Exception as e:
-            print(f"[activity] Error building BA activity: {e}")
-            continue
-    
-    # Convert place-based activities
-    place_activities: List[schemas.ActivityBase] = []
-    for item in place_items[:3]:
-        try:
-            tags = item.get("tags") or []
-            if not any("+ PlaceBased" in str(t) for t in tags):
-                tags.append("+ PlaceBased")
-            
-            location_label = item.get("location_label")
-            lat: Optional[float] = None
-            lng: Optional[float] = None
-            place_id: Optional[str] = None
-            
-            # Try to match location to a real place
-            if location_label and all_nearby_places:
-                place_detail = _find_place_by_name(location_label, all_nearby_places)
-                if place_detail:
-                    lat = place_detail["lat"]
-                    lng = place_detail["lng"]
-                    place_id = place_detail["place_id"]
-                    location_label = place_detail["name"]
-                elif all_nearby_places:
-                    # Use first available place as fallback
-                    fallback = all_nearby_places[0]
-                    lat = fallback["lat"]
-                    lng = fallback["lng"]
-                    place_id = fallback["place_id"]
-                    location_label = fallback["name"]
-            
-            act = schemas.ActivityBase(
-                title=(item.get("title") or "").strip() or "Activity at a nearby place",
-                description=(item.get("description") or "").strip() or "Do your action at this nearby location.",
-                life_area=item.get("life_area", "Movement"),
-                effort_level=item.get("effort_level", "medium"),
-                reward_type=item.get("reward_type", "movement"),
-                default_duration_min=item.get("default_duration_min") or 15,
-                location_label=location_label or "Nearby",
-                tags=tags,
-                lat=lat,
-                lng=lng,
-                place_id=place_id,
-            )
-            place_activities.append(act)
-        except Exception as e:
-            print(f"[activity] Error building place-based activity: {e}")
-            continue
-    
-    return ba_activities, place_activities
-
-
-# =============================================================================
 # UPDATED: Store generated activities with action tracking metadata
 # =============================================================================
 
@@ -1925,37 +1694,35 @@ def generate_from_action(
     db: Session = Depends(get_db),
 ):
     """
-    Generate 6 activities based on the user's action intention from the video experience.
+    Generate 6 place-based BA activities based on the user's action intention.
     
-    NEW FLOW: Generates 3 BA activities + 3 place-based activities.
+    All 6 activities are:
+    - Behavioural Activation (BA) activities - variations of the user's action
+    - Place-based - each at a real nearby location from Google Maps
     
-    BA activities (3):
-    - Direct variations of the user's stated action
-    - Can be done anywhere (at home, etc.)
-    - Different effort levels (easy, medium, longer)
-    
-    Place-based activities (3):
-    - Same action intention but at a specific nearby place
-    - Uses Google Maps for real locations
-    - Combines the action with getting out
+    Example: If action is "Call my mom":
+    1. "Call mom while walking at Central Park" - at park
+    2. "Voice message to mom from Starbucks" - at cafe  
+    3. "Video call mom from the library" - at library
+    4. "Quick check-in call at the gym" - at gym
+    5. "Walk and talk with mom at Riverside Park" - at park
+    6. "Call mom over coffee at Blue Bottle" - at cafe
     
     This endpoint is called after the user completes the video watching flow
-    and has entered their action intention (e.g., "Call my mom", "Go for a walk").
+    and has entered their action intention.
     
     Request:
         - user_hash: Required
         - action_today: The user's stated action intention
         - session_id: Optional - video session ID for linking
         - value_selected: Optional - the value that resonated
-        - gps_lat/gps_lng: Optional - for place-based activities
     
     Returns:
-        List of 6 activities (3 BA + 3 place-based) tailored to the user's action
+        List of 6 place-based BA activities tailored to the user's action
     """
     user_hash = payload.user_hash
     action_today = payload.action_today
     session_id = getattr(payload, 'session_id', None)
-    value_selected = getattr(payload, 'value_selected', None)
     gps_lat = getattr(payload, 'gps_lat', None)
     gps_lng = getattr(payload, 'gps_lng', None)
     
@@ -1977,79 +1744,57 @@ def generate_from_action(
         except Exception:
             pass
     
-    # Get additional context for personalization
-    fb = _fallback_context_from_history(db, user_hash)
-    
     # Generate session ID for linking activities to this video session
     video_session_id = session_id or str(uuid.uuid4())
     
-    # =============================================================================
-    # NEW: Generate 3 BA + 3 place-based activities
-    # =============================================================================
-    ba_activities, place_activities = _generate_ba_and_place_based_activities(
-        action_intention=action_today,
-        value_selected=value_selected,
+    # Generate 6 place-based BA activities using existing LLM + Google Maps logic
+    generated = _generate_activities_from_action(
+        db,
+        user_hash=user_hash,
+        action_today=action_today,
         postal_code=postal_code,
         gps_lat=gps_lat,
         gps_lng=gps_lng,
-        emotion_word=fb.get("emotion_word"),
-        chills_detail=fb.get("chills_detail"),
-        last_insight=fb.get("last_insight"),
+        count=6,
     )
     
-    # Fallback to old generation if new method fails
-    if not ba_activities and not place_activities:
-        print(f"[activity] BA+place generation failed, falling back to standard generation")
-        generated = _generate_activities_from_action(
-            db,
-            user_hash=user_hash,
-            action_today=action_today,
-            postal_code=postal_code,
-            gps_lat=gps_lat,
-            gps_lng=gps_lng,
-            count=6,
-        )
-        
-        if not generated:
-            raise HTTPException(status_code=500, detail="Failed to generate activities")
-        
-        # Store with action tracking
-        rows = _store_generated_activities(
-            db, 
-            activities=generated, 
-            user_hash=user_hash,
-            action_intention=action_today,
-            source_type="action_intention",
-            video_session_id=video_session_id,
-        )
-        
-        recs = [_to_activity_out(a) for a in rows] if rows else []
+    if not generated:
+        raise HTTPException(status_code=500, detail="Failed to generate activities")
+    
+    # Store activities with action tracking metadata
+    rows = _store_generated_activities(
+        db, 
+        activities=generated, 
+        user_hash=user_hash,
+        action_intention=action_today,
+        source_type="action_intention",
+        video_session_id=video_session_id,
+    )
+    
+    # Convert to output format
+    if rows:
+        recs: List[schemas.ActivityRecommendationOut] = [_to_activity_out(a) for a in rows]
     else:
-        # Store BA activities
-        ba_rows = _store_generated_activities(
-            db,
-            activities=ba_activities,
-            user_hash=user_hash,
-            action_intention=action_today,
-            source_type="action_intention",
-            video_session_id=video_session_id,
-        )
-        
-        # Store place-based activities
-        place_rows = _store_generated_activities(
-            db,
-            activities=place_activities,
-            user_hash=user_hash,
-            action_intention=action_today,
-            source_type="place_based",
-            video_session_id=video_session_id,
-        )
-        
-        # Combine results: BA activities first, then place-based
-        all_rows = ba_rows + place_rows
-        recs = [_to_activity_out(a) for a in all_rows] if all_rows else []
-        
-        print(f"[activity] Generated {len(ba_rows)} BA + {len(place_rows)} place-based activities for action '{action_today}'")
+        # Fallback if storage failed
+        recs = []
+        for idx, act in enumerate(generated):
+            recs.append(schemas.ActivityRecommendationOut(
+                id=-(idx + 2000),
+                title=act.title,
+                description=act.description or "",
+                life_area=act.life_area,
+                effort_level=act.effort_level,
+                reward_type=act.reward_type,
+                default_duration_min=act.default_duration_min,
+                location_label=act.location_label,
+                tags=act.tags or [],
+                user_hash=None,
+                lat=act.lat,
+                lng=act.lng,
+                place_id=act.place_id,
+            ))
+    
+    print(f"[activity] Generated {len(recs)} place-based BA activities for action '{action_today}'")
     
     # Get therapist activities if any
     therapist_activities = _get_therapist_suggested_activities_for_patient(db, user_hash)
@@ -2058,12 +1803,10 @@ def generate_from_action(
         recs.extend(therapist_outs)
     
     # Commit the first activity as the user's current activity
-    if recs and user_hash:
+    if rows and user_hash:
         try:
-            first_id = recs[0].id
-            if first_id > 0:  # Only commit real activities
-                _commit_activity(db, user_hash=user_hash, activity_id=first_id)
-                print(f"[activity] Committed first activity id={first_id} for user {user_hash}")
+            _commit_activity(db, user_hash=user_hash, activity_id=rows[0].id)
+            print(f"[activity] Committed first activity '{rows[0].title}' for user {user_hash}")
         except Exception as e:
             print(f"[activity] Failed to commit first activity: {e}")
     
