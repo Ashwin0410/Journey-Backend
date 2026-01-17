@@ -27,6 +27,62 @@ def get_db():
 
 
 # ============================================================================
+# INTAKE FLOW CONFIGURATION
+# ============================================================================
+# 
+# The intake flow has been simplified. The following screens are now HIDDEN:
+# 
+# ❌ HIDDEN: Pre-intake "What's on your mind?" screen (Image 1)
+# ❌ HIDDEN: Life area selection screen (Image 2)  
+# ❌ HIDDEN: Life focus selection screen
+# ❌ HIDDEN: Schema assessment questions
+# ❌ HIDDEN: Weekly plan questions
+#
+# ✅ SHOWN: Demographics (age, gender)
+# ✅ SHOWN: PHQ-9 questions
+# ✅ SHOWN: ML Personality Questionnaire (9 questions for video recommendation)
+#
+# The backend endpoints for hidden screens are KEPT for backwards compatibility
+# but the frontend will skip them based on the flow-config endpoint response.
+#
+# ============================================================================
+
+
+class IntakeFlowConfig(BaseModel):
+    """Configuration for which intake screens to show."""
+    show_pre_intake: bool = False
+    show_life_area: bool = False
+    show_life_focus: bool = False
+    show_schema_assessment: bool = False
+    show_weekly_plan: bool = False
+    show_demographics: bool = True
+    show_phq9: bool = True
+    show_ml_questionnaire: bool = True
+    flow_version: str = "v2"  # v1 = old flow with all screens, v2 = simplified
+
+
+@r.get("/flow-config", response_model=IntakeFlowConfig)
+def get_intake_flow_config():
+    """
+    Get the current intake flow configuration.
+    
+    Frontend uses this to determine which screens to show/hide during onboarding.
+    This allows us to toggle features without frontend code changes.
+    """
+    return IntakeFlowConfig(
+        show_pre_intake=False,      # HIDDEN: "What's on your mind?"
+        show_life_area=False,       # HIDDEN: Life area selection
+        show_life_focus=False,      # HIDDEN: Life focus selection
+        show_schema_assessment=False,  # HIDDEN: Schema questions
+        show_weekly_plan=False,     # HIDDEN: Weekly plan
+        show_demographics=True,     # SHOWN: Age, gender
+        show_phq9=True,            # SHOWN: PHQ-9 assessment
+        show_ml_questionnaire=True, # SHOWN: ML personality questions
+        flow_version="v2",
+    )
+
+
+# ============================================================================
 # ML QUESTIONNAIRE SCHEMAS
 # ============================================================================
 
@@ -34,8 +90,13 @@ class MLQuestionnaireIn(BaseModel):
     """
     Input schema for ML personality questionnaire.
     
-    These 10 questions are used by the ONNX model to predict
+    These 9 questions are used by the ONNX model to predict
     which videos are most likely to induce chills for this user.
+    
+    Question codes and their scales:
+    - DPES_1, DPES_4, DPES_29: 1-7 scale (Dispositional Positive Emotion Scale)
+    - NEO-FFI_10, NEO-FFI_14, NEO-FFI_16, NEO-FFI_45, NEO-FFI_46: 1-5 scale
+    - KAMF_4_1: 1-7 scale (easily moved/touched)
     """
     # Personality trait questions
     dpes_1: int = Field(
@@ -117,7 +178,53 @@ class MLQuestionnaireOut(BaseModel):
 
 
 # ============================================================================
-# EXISTING HELPER FUNCTIONS
+# SIMPLIFIED DEMOGRAPHICS SCHEMA (NEW FLOW)
+# ============================================================================
+
+class DemographicsIn(BaseModel):
+    """
+    Simplified demographics input for the new intake flow.
+    Only collects essential information - no life_area, life_focus, schema items, etc.
+    """
+    age: int = Field(ge=13, le=120, description="User's age in years")
+    gender: str = Field(description="User's gender")
+    postal_code: Optional[str] = Field(None, description="Postal/ZIP code")
+    
+    # Safety questions (kept for clinical safety)
+    in_therapy: bool = Field(default=False)
+    on_medication: bool = Field(default=False)
+    psychosis_history: bool = Field(default=False)
+    pregnant_or_planning: bool = Field(default=False)
+
+
+class DemographicsOut(BaseModel):
+    """Output schema for demographics submission."""
+    success: bool
+    message: str
+    intake_id: int
+
+
+class Phq9ItemIn(BaseModel):
+    """Single PHQ-9 question response."""
+    question_number: int = Field(ge=1, le=9)
+    score: int = Field(ge=0, le=3)
+
+
+class Phq9SubmitIn(BaseModel):
+    """PHQ-9 questionnaire submission."""
+    items: List[Phq9ItemIn] = Field(min_length=9, max_length=9)
+
+
+class Phq9Out(BaseModel):
+    """Output schema for PHQ-9 submission."""
+    success: bool
+    message: str
+    total_score: int
+    safety_flag: int  # 0=normal, 1=elevated, 2=high risk (Q9 > 0)
+
+
+# ============================================================================
+# HELPER FUNCTIONS
 # ============================================================================
 
 def _build_intake_out(intake: models.ClinicalIntake, db: Session) -> schemas.IntakeFullOut:
@@ -185,7 +292,176 @@ def _build_intake_out(intake: models.ClinicalIntake, db: Session) -> schemas.Int
 
 
 # ============================================================================
-# EXISTING ENDPOINTS (UNCHANGED)
+# PHQ-9 QUESTION PROMPTS (for reference)
+# ============================================================================
+
+PHQ9_PROMPTS = [
+    "Little interest or pleasure in doing things",
+    "Feeling down, depressed, or hopeless",
+    "Trouble falling or staying asleep, or sleeping too much",
+    "Feeling tired or having little energy",
+    "Poor appetite or overeating",
+    "Feeling bad about yourself — or that you are a failure or have let yourself or your family down",
+    "Trouble concentrating on things, such as reading the newspaper or watching television",
+    "Moving or speaking so slowly that other people could have noticed? Or the opposite — being so fidgety or restless that you have been moving around a lot more than usual",
+    "Thoughts that you would be better off dead or of hurting yourself in some way",
+]
+
+
+# ============================================================================
+# NEW SIMPLIFIED INTAKE ENDPOINTS (V2 FLOW)
+# ============================================================================
+
+@r.post("/demographics", response_model=DemographicsOut)
+def submit_demographics(
+    payload: DemographicsIn,
+    current_user: models.Users = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Submit basic demographics for the simplified V2 intake flow.
+    
+    This is the first step in the new flow:
+    1. Demographics (this endpoint)
+    2. PHQ-9 questions
+    3. ML Personality Questionnaire
+    
+    NOTE: This does NOT set onboarding_complete=True. That happens
+    after the ML questionnaire is submitted.
+    """
+    user_hash = current_user.user_hash
+    
+    # Check if there's an existing intake to update
+    existing_intake = (
+        db.query(models.ClinicalIntake)
+        .filter(models.ClinicalIntake.user_hash == user_hash)
+        .order_by(models.ClinicalIntake.created_at.desc())
+        .first()
+    )
+    
+    if existing_intake:
+        # Update existing intake
+        intake = existing_intake
+        intake.age = payload.age
+        intake.gender = payload.gender
+        intake.postal_code = payload.postal_code
+        intake.in_therapy = payload.in_therapy
+        intake.on_medication = payload.on_medication
+        intake.psychosis_history = payload.psychosis_history
+        intake.pregnant_or_planning = payload.pregnant_or_planning
+        db.commit()
+        db.refresh(intake)
+    else:
+        # Create new intake
+        intake = models.ClinicalIntake(
+            user_hash=user_hash,
+            age=payload.age,
+            gender=payload.gender,
+            postal_code=payload.postal_code,
+            in_therapy=payload.in_therapy,
+            on_medication=payload.on_medication,
+            psychosis_history=payload.psychosis_history,
+            pregnant_or_planning=payload.pregnant_or_planning,
+        )
+        db.add(intake)
+        db.commit()
+        db.refresh(intake)
+    
+    return DemographicsOut(
+        success=True,
+        message="Demographics saved successfully",
+        intake_id=intake.id,
+    )
+
+
+@r.post("/phq9", response_model=Phq9Out)
+def submit_phq9(
+    payload: Phq9SubmitIn,
+    current_user: models.Users = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Submit PHQ-9 questionnaire responses.
+    
+    This is the second step in the new V2 flow:
+    1. Demographics
+    2. PHQ-9 questions (this endpoint)
+    3. ML Personality Questionnaire
+    
+    The PHQ-9 is a 9-question depression screening tool.
+    Each question is scored 0-3 (Not at all, Several days, More than half, Nearly every day).
+    
+    Safety flag logic:
+    - 0 = Normal
+    - 1 = Elevated (total score >= 15)
+    - 2 = High risk (question 9 score > 0, indicates self-harm thoughts)
+    """
+    user_hash = current_user.user_hash
+    
+    # Get existing intake
+    intake = (
+        db.query(models.ClinicalIntake)
+        .filter(models.ClinicalIntake.user_hash == user_hash)
+        .order_by(models.ClinicalIntake.created_at.desc())
+        .first()
+    )
+    
+    if not intake:
+        # Create a minimal intake if none exists (edge case)
+        intake = models.ClinicalIntake(user_hash=user_hash)
+        db.add(intake)
+        db.commit()
+        db.refresh(intake)
+    
+    # Delete any existing PHQ-9 responses for this intake
+    db.query(models.Phq9ItemResponse).filter(
+        models.Phq9ItemResponse.intake_id == intake.id
+    ).delete()
+    db.commit()
+    
+    # Store new PHQ-9 responses
+    total_score = 0
+    q9_score = 0
+    
+    for item in payload.items:
+        prompt = PHQ9_PROMPTS[item.question_number - 1] if item.question_number <= len(PHQ9_PROMPTS) else ""
+        
+        db.add(models.Phq9ItemResponse(
+            intake_id=intake.id,
+            user_hash=user_hash,
+            question_number=item.question_number,
+            prompt=prompt,
+            score=item.score,
+            is_suicide_item=(item.question_number == 9),
+        ))
+        
+        total_score += item.score
+        if item.question_number == 9:
+            q9_score = item.score
+    
+    # Calculate safety flag
+    safety_flag = 0
+    if q9_score > 0:
+        safety_flag = 2  # High risk - self-harm thoughts indicated
+    elif total_score >= 15:
+        safety_flag = 1  # Elevated depression score
+    
+    # Update user safety flag
+    user = db.merge(current_user)
+    user.safety_flag = safety_flag
+    user.last_phq9_date = date_cls.today()
+    db.commit()
+    
+    return Phq9Out(
+        success=True,
+        message="PHQ-9 responses saved successfully",
+        total_score=total_score,
+        safety_flag=safety_flag,
+    )
+
+
+# ============================================================================
+# LEGACY ENDPOINTS (KEPT FOR BACKWARDS COMPATIBILITY)
 # ============================================================================
 
 @r.post("/pre-intake", response_model=schemas.PreIntakeOut)
@@ -199,7 +475,9 @@ def submit_pre_intake(
     Creates a new ClinicalIntake record with just the pre_intake_text,
     or updates an existing incomplete one.
     
-    NOTE: This endpoint is HIDDEN in the new flow but kept for backwards compatibility.
+    ⚠️ HIDDEN IN V2 FLOW: This endpoint is hidden in the new simplified flow
+    but kept for backwards compatibility. The frontend will skip this screen
+    based on the /flow-config response.
     """
     user_hash = current_user.user_hash
 
@@ -240,8 +518,15 @@ def submit_full_intake(
     """
     Submit full intake with demographics, PHQ-9, schema items, weekly plan.
     
-    NOTE: Schema assessment and weekly plan portions are HIDDEN in the new flow
-    but this endpoint is kept for backwards compatibility.
+    ⚠️ LEGACY ENDPOINT: This is the old full intake endpoint that includes
+    all screens (life_area, life_focus, schema assessment, weekly plan).
+    
+    In the V2 flow, use these endpoints instead:
+    1. POST /api/intake/demographics
+    2. POST /api/intake/phq9
+    3. POST /api/intake/ml-questionnaire
+    
+    This endpoint is kept for backwards compatibility.
     """
 
     user = current_user
@@ -384,7 +669,7 @@ def get_my_intake(
 
 
 # ============================================================================
-# NEW ML QUESTIONNAIRE ENDPOINT
+# ML QUESTIONNAIRE ENDPOINT
 # ============================================================================
 
 @r.post("/ml-questionnaire", response_model=MLQuestionnaireOut)
@@ -396,11 +681,17 @@ def submit_ml_questionnaire(
     """
     Submit ML personality questionnaire and get personalized video recommendations.
     
+    This is the FINAL step in the V2 intake flow:
+    1. Demographics
+    2. PHQ-9 questions
+    3. ML Personality Questionnaire (this endpoint)
+    
     This endpoint:
     1. Stores the user's questionnaire responses
     2. Runs the ONNX ML model to predict chills probability for 40 videos
-    3. Stores the top video suggestions for this user
-    4. Returns the ranked video suggestions
+    3. Stores the top 10 video suggestions for this user
+    4. Marks onboarding as complete
+    5. Returns the ranked video suggestions
     
     The user will watch the rank #1 video on Day 1, rank #2 on Day 2, etc.
     """
@@ -425,7 +716,7 @@ def submit_ml_questionnaire(
         )
         if existing_intake:
             if not age and existing_intake.age:
-                age = existing_intake.age
+                age = str(existing_intake.age)
             if not gender and existing_intake.gender:
                 gender = existing_intake.gender
     
@@ -572,13 +863,21 @@ def submit_ml_questionnaire(
     print(f"[intake] Stored {len(suggestions_out)} video suggestions for user {user_hash}")
     
     # =========================================================================
-    # STEP 5: Mark user as having completed ML questionnaire
+    # STEP 5: Mark user as having completed ML questionnaire AND onboarding
     # =========================================================================
     
     # Update user record to indicate ML questionnaire is complete
     user = db.merge(current_user)
     user.ml_questionnaire_complete = True
+    user.onboarding_complete = True  # V2 flow: ML questionnaire completion = onboarding complete
+    
+    # Initialize journey day if not set
+    if user.journey_day is None:
+        user.journey_day = 1
+    
     db.commit()
+    
+    print(f"[intake] User {user_hash} onboarding complete, journey_day={user.journey_day}")
     
     return MLQuestionnaireOut(
         success=True,
@@ -660,16 +959,20 @@ def get_video_for_today(
     Get today's video recommendation based on user's journey day.
     
     Day 1 = rank #1 video, Day 2 = rank #2 video, etc.
+    If journey_day > 10 (we only have 10 suggestions), it wraps around.
     """
     user_hash = current_user.user_hash
     journey_day = current_user.journey_day or 1
+    
+    # Wrap around if we've gone past 10 days
+    effective_rank = ((journey_day - 1) % 10) + 1
     
     # Get the suggestion for this day
     suggestion = (
         db.query(models.StimuliSuggestion)
         .filter(
             models.StimuliSuggestion.user_hash == user_hash,
-            models.StimuliSuggestion.stimulus_rank == journey_day,
+            models.StimuliSuggestion.stimulus_rank == effective_rank,
         )
         .first()
     )
