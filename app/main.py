@@ -90,6 +90,53 @@ def run_migrations():
                 print("[migration] Added video_session_id column to activities table")
             
             # -----------------------------------------------------------------
+            # Migration 1b: BACKFILL user_hash for existing activities
+            # This fixes Issue #4: Existing users can't see their activities
+            # because activities have user_hash=NULL
+            # -----------------------------------------------------------------
+            try:
+                # Count activities with NULL user_hash
+                result = conn.execute(text(
+                    "SELECT COUNT(*) FROM activities WHERE user_hash IS NULL"
+                ))
+                null_count = result.fetchone()[0]
+                
+                if null_count > 0:
+                    print(f"[migration] Found {null_count} activities with NULL user_hash, attempting backfill...")
+                    
+                    # Backfill from ActivitySessions (which has user_hash and activity_id)
+                    conn.execute(text("""
+                        UPDATE activities
+                        SET user_hash = (
+                            SELECT activity_sessions.user_hash 
+                            FROM activity_sessions 
+                            WHERE activity_sessions.activity_id = activities.id 
+                            AND activity_sessions.user_hash IS NOT NULL
+                            LIMIT 1
+                        )
+                        WHERE activities.user_hash IS NULL
+                        AND EXISTS (
+                            SELECT 1 FROM activity_sessions 
+                            WHERE activity_sessions.activity_id = activities.id
+                            AND activity_sessions.user_hash IS NOT NULL
+                        )
+                    """))
+                    conn.commit()
+                    
+                    # Check how many were updated
+                    result = conn.execute(text(
+                        "SELECT COUNT(*) FROM activities WHERE user_hash IS NULL"
+                    ))
+                    remaining_null = result.fetchone()[0]
+                    updated_count = null_count - remaining_null
+                    
+                    print(f"[migration] Backfilled user_hash for {updated_count} activities")
+                    if remaining_null > 0:
+                        print(f"[migration] {remaining_null} activities still have NULL user_hash (no ActivitySession link)")
+            except Exception as backfill_err:
+                print(f"[migration] Backfill error (non-fatal): {backfill_err}")
+            
+            # -----------------------------------------------------------------
             # Migration 2: Add deleted_at column to users table (Soft Delete)
             # -----------------------------------------------------------------
             result = conn.execute(text("PRAGMA table_info(users)"))
