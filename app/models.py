@@ -129,6 +129,19 @@ class Activities(Base):
     lat = Column(Float, nullable=True)
     lng = Column(Float, nullable=True)
     place_id = Column(String, nullable=True)  # Google Place ID for precise directions
+    
+    # =============================================================================
+    # NEW FIELDS FOR ACTION-BASED ACTIVITY GENERATION
+    # =============================================================================
+    # The user's action intention text that generated this activity
+    # e.g., "Call my mom", "Go for a walk", "Write in journal"
+    action_intention = Column(Text, nullable=True)
+    
+    # Source of the activity: "action_intention", "place_based", "therapist", "system"
+    source_type = Column(String, index=True, nullable=True)
+    
+    # Session ID of the video session that generated this activity
+    video_session_id = Column(String, index=True, nullable=True)
 
 
 
@@ -181,6 +194,15 @@ class Users(Base):
 
     
     onboarding_complete = Column(Boolean, default=False, nullable=False)
+    
+    # =============================================================================
+    # NEW FIELD: ML Questionnaire completion tracking
+    # =============================================================================
+    # True when user has completed the ML personality questionnaire
+    # This is separate from onboarding_complete as user may complete onboarding
+    # but not have filled out the ML questionnaire yet (legacy users)
+    ml_questionnaire_complete = Column(Boolean, default=False, nullable=False)
+    
     safety_flag = Column(Integer, nullable=True)        # 0/1/2 style risk level
     last_phq9_date = Column(Date, nullable=True, index=True)
 
@@ -930,6 +952,8 @@ class VideoSuggestionLog(Base):
     questionnaire_id = Column(Integer, ForeignKey("ml_questionnaires.id"), nullable=True)
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 # =============================================================================
 # MISSING MODELS REQUIRED BY ROUTES
 # =============================================================================
@@ -994,6 +1018,7 @@ class PostVideoResponse(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     session_id = Column(String, index=True, nullable=False)
+    user_hash = Column(String, index=True, nullable=True)
     insights_text = Column(Text, nullable=True)
     value_selected = Column(String, nullable=True)
     value_custom = Column(String, nullable=True)
