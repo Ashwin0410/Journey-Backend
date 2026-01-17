@@ -989,7 +989,7 @@ def commit_activity(
     include_in_schema=False,
 )
 def get_recommendation(
-    user_hash: Optional[str] = Query(None, description="Optional user hash"),
+    user_hash: str = Query(..., description="User hash - REQUIRED for proper activity isolation"),
     life_area: Optional[str] = Query(None, description="Preferred life area filter, e.g., 'Connection'"),
     mood: Optional[str] = Query(None, description="Current mood (from intake)"),
     schema_hint: Optional[str] = Query(None, description="Schema / story (from intake)"),
@@ -1000,14 +1000,12 @@ def get_recommendation(
     gps_lat: Optional[float] = Query(None, description="GPS latitude for location-based refresh"),
     gps_lng: Optional[float] = Query(None, description="GPS longitude for location-based refresh"),
     limit: int = Query(6, ge=1, le=20, description="Maximum number of activities to return"),
-    commit_first: bool = Query(False, description="If true (and user_hash present), persist the top pick"),
+    commit_first: bool = Query(False, description="If true, persist the top pick as user's current activity"),
     db: Session = Depends(get_db),
 ):
     # =============================================================================
-    # FIX Issue #3: Warn if no user_hash - activities won't be stored
+    # BUG FIX: user_hash is now REQUIRED - no activities without user identification
     # =============================================================================
-    if not user_hash:
-        print("[activity] WARNING: /recommendation called without user_hash - activities will be generated but NOT stored")
 
     # Chills-based fields for personalization
     emotion_word: Optional[str] = None
@@ -1019,26 +1017,26 @@ def get_recommendation(
     intake_life_focus: Optional[str] = None
     week_actions: Optional[List[str]] = None
 
-    if user_hash:
-        fb = _fallback_context_from_history(db, user_hash)
-        def eff(val, fallback):
-            if val is None or (isinstance(val, str) and val.strip() == ""):
-                return fallback
-            return val
-        postal_code = eff(postal_code, fb.get("postal_code"))
-        schema_hint = eff(schema_hint, fb.get("schema_hint"))
-        mood = eff(mood, fb.get("mood"))
-        goal_today = eff(goal_today, fb.get("goal_today"))
-        place = eff(place, fb.get("place"))
-        # Get chills-based fields
-        emotion_word = fb.get("emotion_word")
-        chills_detail = fb.get("chills_detail")
-        last_insight = fb.get("last_insight")
-        chills_level = fb.get("chills_level")
-        # NEW: Get intake weekly plan fields
-        intake_life_area = fb.get("life_area")
-        intake_life_focus = fb.get("life_focus")
-        week_actions = fb.get("week_actions", [])
+    # Get context from user history (user_hash is always present now)
+    fb = _fallback_context_from_history(db, user_hash)
+    def eff(val, fallback):
+        if val is None or (isinstance(val, str) and val.strip() == ""):
+            return fallback
+        return val
+    postal_code = eff(postal_code, fb.get("postal_code"))
+    schema_hint = eff(schema_hint, fb.get("schema_hint"))
+    mood = eff(mood, fb.get("mood"))
+    goal_today = eff(goal_today, fb.get("goal_today"))
+    place = eff(place, fb.get("place"))
+    # Get chills-based fields
+    emotion_word = fb.get("emotion_word")
+    chills_detail = fb.get("chills_detail")
+    last_insight = fb.get("last_insight")
+    chills_level = fb.get("chills_level")
+    # NEW: Get intake weekly plan fields
+    intake_life_area = fb.get("life_area")
+    intake_life_focus = fb.get("life_focus")
+    week_actions = fb.get("week_actions", [])
 
     print(f"[activity] /recommendation called with postal_code='{postal_code}', user_hash='{user_hash}', life_area='{intake_life_area}', life_focus='{intake_life_focus}', gps_lat={gps_lat}, gps_lng={gps_lng}")
 
@@ -1064,17 +1062,15 @@ def get_recommendation(
     )
 
     # BUG FIX (Change 7): Pass user_hash when storing activities
-    # FIX Issue #3: _store_generated_activities now returns empty list if no user_hash
     rows = _store_generated_activities(db, activities=generated, user_hash=user_hash)
 
     # CHANGE #4: Get therapist-suggested activities for THIS SPECIFIC PATIENT ONLY
     # These are returned directly without creating global Activity rows
+    therapist_activities = _get_therapist_suggested_activities_for_patient(db, user_hash)
     therapist_activity_outs: List[schemas.ActivityRecommendationOut] = []
-    if user_hash:
-        therapist_activities = _get_therapist_suggested_activities_for_patient(db, user_hash)
-        if therapist_activities:
-            print(f"[activity] Adding {len(therapist_activities)} therapist-suggested activities for patient")
-            therapist_activity_outs = [_therapist_activity_to_out(ta) for ta in therapist_activities]
+    if therapist_activities:
+        print(f"[activity] Adding {len(therapist_activities)} therapist-suggested activities for patient")
+        therapist_activity_outs = [_therapist_activity_to_out(ta) for ta in therapist_activities]
 
     # =============================================================================
     # FIX Issue #3: If no rows stored (no user_hash), convert generated activities directly
@@ -1129,7 +1125,7 @@ def get_recommendation(
     # CHANGE #4: Add therapist activities at the end (they're patient-specific)
     recs.extend(therapist_activity_outs)
 
-    if commit_first and user_hash and recs:
+    if commit_first and recs:
         try:
             first_activity_id = recs[0].id
             # Only commit if it's a positive ID (regular activity)
@@ -1159,41 +1155,36 @@ def get_recommendation(
     include_in_schema=False,
 )
 def get_library(
-    user_hash: Optional[str] = Query(None, description="User hash to filter activities and include therapist-suggested activities"),
+    user_hash: str = Query(..., description="User hash - REQUIRED to filter activities"),
     limit: int = Query(6, ge=1, le=20, description="Maximum number of activities to return"),
     db: Session = Depends(get_db),
 ):
     """
     Return the latest active activities for the user plus any therapist-suggested activities.
     
-    FIX Issue #1: Added limit parameter to control number of activities returned.
-    Default is 6, can be set from 1 to 20.
+    BUG FIX: user_hash is now REQUIRED and activities are STRICTLY filtered to this user only.
     
-    BUG FIX (Change 7): Now filters activities by user_hash to prevent cross-user data pollution.
-    Previously, all activities were returned globally regardless of which user created them.
+    Previously, activities with user_hash=NULL were returned to ALL users, causing
+    one user's activities to appear for other users.
     
-    CHANGE #4: Therapist activities are now patient-specific and not converted to global Activities.
-    
-    FIX Issue #3: User isolation with fallback to global activities.
-    - If user has their own activities, return those
-    - If user has no activities, fallback to global activities (user_hash=None)
-    - This ensures new users see activities while maintaining user isolation
+    Now:
+    - Returns ONLY activities with matching user_hash
+    - If user has no activities, returns empty list (frontend should trigger generation)
+    - Therapist activities are still included (they're patient-specific)
     """
     # =============================================================================
-    # BUG FIX (Change 7): Build query with user_hash filter
-    # Returns user's activities OR global activities (backward compatibility)
+    # BUG FIX: STRICT user_hash filter - no NULL fallback
     # =============================================================================
-    query = db.query(models.Activities).filter(models.Activities.is_active == True)
-    
-    if user_hash:
-        # Return only this user's activities (or activities with no user_hash for backward compatibility)
-        query = query.filter(
-            (models.Activities.user_hash == user_hash) | 
-            (models.Activities.user_hash == None)
+    acts = (
+        db.query(models.Activities)
+        .filter(
+            models.Activities.is_active == True,
+            models.Activities.user_hash == user_hash,  # STRICT: Only this user's activities
         )
-    
-    # FIX Issue #1: Use limit parameter instead of hardcoded 6
-    acts = query.order_by(models.Activities.created_at.desc()).limit(limit).all()
+        .order_by(models.Activities.created_at.desc())
+        .limit(limit)
+        .all()
+    )
     
     print(f"[activity] /library returning {len(acts)} activities for user_hash={user_hash}, limit={limit}")
 
