@@ -972,6 +972,9 @@ class ActivityFromActionIn(BaseModel):
     action_today: str  # The action the user committed to
     session_id: Optional[str] = None  # Video session ID
     value_selected: Optional[str] = None  # The value that resonated
+    # GPS coordinates for place-based activities (1.2km radius)
+    gps_lat: Optional[float] = None  # GPS latitude
+    gps_lng: Optional[float] = None  # GPS longitude
 
 
 class ActivityFromActionOut(BaseModel):
