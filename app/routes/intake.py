@@ -331,6 +331,8 @@ def submit_demographics(
     """
     user_hash = current_user.user_hash
     
+    print(f"[intake] Demographics submitted by user {user_hash}")
+    
     # Check if there's an existing intake to update
     existing_intake = (
         db.query(models.ClinicalIntake)
@@ -351,6 +353,7 @@ def submit_demographics(
         intake.pregnant_or_planning = payload.pregnant_or_planning
         db.commit()
         db.refresh(intake)
+        print(f"[intake] Updated existing intake id={intake.id}")
     else:
         # Create new intake
         intake = models.ClinicalIntake(
@@ -366,6 +369,7 @@ def submit_demographics(
         db.add(intake)
         db.commit()
         db.refresh(intake)
+        print(f"[intake] Created new intake id={intake.id}")
     
     return DemographicsOut(
         success=True,
@@ -398,6 +402,8 @@ def submit_phq9(
     """
     user_hash = current_user.user_hash
     
+    print(f"[intake] PHQ-9 submitted by user {user_hash}")
+    
     # Get existing intake
     intake = (
         db.query(models.ClinicalIntake)
@@ -412,6 +418,7 @@ def submit_phq9(
         db.add(intake)
         db.commit()
         db.refresh(intake)
+        print(f"[intake] Created minimal intake for PHQ-9, id={intake.id}")
     
     # Delete any existing PHQ-9 responses for this intake
     db.query(models.Phq9ItemResponse).filter(
@@ -451,6 +458,8 @@ def submit_phq9(
     user.safety_flag = safety_flag
     user.last_phq9_date = date_cls.today()
     db.commit()
+    
+    print(f"[intake] PHQ-9 saved: total_score={total_score}, safety_flag={safety_flag}")
     
     return Phq9Out(
         success=True,
@@ -697,6 +706,7 @@ def submit_ml_questionnaire(
     """
     user_hash = current_user.user_hash
     
+    print(f"[intake] ========== ML QUESTIONNAIRE START ==========")
     print(f"[intake] ML questionnaire submitted by user {user_hash}")
     
     # =========================================================================
@@ -719,6 +729,8 @@ def submit_ml_questionnaire(
                 age = str(existing_intake.age)
             if not gender and existing_intake.gender:
                 gender = existing_intake.gender
+    
+    print(f"[intake] Demographics: age={age}, gender={gender}")
     
     # =========================================================================
     # STEP 2: Store questionnaire responses
@@ -807,9 +819,13 @@ def submit_ml_questionnaire(
         "Depression": payload.depression_status,
     }
     
+    print(f"[intake] Calling ML predictor with answers: {answers}")
+    
     # Get predictor and run inference
     try:
         predictor = get_predictor()
+        
+        print(f"[intake] Predictor initialized: {predictor.is_initialized}, error: {predictor.error_message}")
         
         if not predictor.is_initialized:
             raise HTTPException(
@@ -821,11 +837,15 @@ def submit_ml_questionnaire(
         predictions = predictor.predict_top_k(answers, k=10)
         
         print(f"[intake] ML predictor returned {len(predictions)} predictions")
+        for i, pred in enumerate(predictions):
+            print(f"[intake]   #{i+1}: {pred['stimulus_name']} (score={pred['score']:.4f})")
         
     except HTTPException:
         raise
     except Exception as e:
         print(f"[intake] ML prediction error: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(
             status_code=500,
             detail=f"ML prediction failed: {str(e)}"
@@ -877,7 +897,8 @@ def submit_ml_questionnaire(
     
     db.commit()
     
-    print(f"[intake] User {user_hash} onboarding complete, journey_day={user.journey_day}")
+    print(f"[intake] User {user_hash} onboarding_complete={user.onboarding_complete}, ml_questionnaire_complete={user.ml_questionnaire_complete}, journey_day={user.journey_day}")
+    print(f"[intake] ========== ML QUESTIONNAIRE END ==========")
     
     return MLQuestionnaireOut(
         success=True,
@@ -898,6 +919,8 @@ def get_my_ml_questionnaire(
     """
     user_hash = current_user.user_hash
     
+    print(f"[intake] Getting ML questionnaire for user {user_hash}")
+    
     # Get questionnaire response
     questionnaire = (
         db.query(models.MLQuestionnaireResponse)
@@ -906,6 +929,7 @@ def get_my_ml_questionnaire(
     )
     
     if not questionnaire:
+        print(f"[intake] No ML questionnaire found for user {user_hash}")
         return {
             "has_questionnaire": False,
             "questionnaire": None,
@@ -919,6 +943,8 @@ def get_my_ml_questionnaire(
         .order_by(models.StimuliSuggestion.stimulus_rank.asc())
         .all()
     )
+    
+    print(f"[intake] Found questionnaire id={questionnaire.id} with {len(suggestions)} suggestions")
     
     return {
         "has_questionnaire": True,
@@ -964,8 +990,12 @@ def get_video_for_today(
     user_hash = current_user.user_hash
     journey_day = current_user.journey_day or 1
     
+    print(f"[intake] Getting video for today: user={user_hash}, journey_day={journey_day}")
+    
     # Wrap around if we've gone past 10 days
     effective_rank = ((journey_day - 1) % 10) + 1
+    
+    print(f"[intake] Effective rank for day {journey_day} = {effective_rank}")
     
     # Get the suggestion for this day
     suggestion = (
@@ -978,6 +1008,7 @@ def get_video_for_today(
     )
     
     if not suggestion:
+        print(f"[intake] No suggestion found for rank {effective_rank}, trying rank 1")
         # Try to get any suggestion (fallback to rank 1)
         suggestion = (
             db.query(models.StimuliSuggestion)
@@ -987,11 +1018,14 @@ def get_video_for_today(
         )
     
     if not suggestion:
+        print(f"[intake] No video suggestions found for user {user_hash}")
         return {
             "has_video": False,
             "message": "No video suggestions found. Please complete the ML questionnaire first.",
             "video": None,
         }
+    
+    print(f"[intake] Returning video: {suggestion.stimulus_name} (rank={suggestion.stimulus_rank})")
     
     return {
         "has_video": True,
