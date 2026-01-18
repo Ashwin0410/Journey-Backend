@@ -31,6 +31,17 @@ MUSIC_INTRO_MS = 6000
 DAY1_STATIC_AUDIO_FILENAME = "videoplayback.m4a"
 
 
+# =============================================================================
+# AUDIO GENERATION FEATURE FLAG
+# =============================================================================
+# Set to False to disable audio generation for patients.
+# Patients now use ML-recommended videos instead of generated audio.
+# Keep the code for potential future use (e.g., therapist features).
+# =============================================================================
+
+AUDIO_GENERATION_ENABLED = False
+
+
 def db():
     q = SessionLocal()
     try:
@@ -246,6 +257,7 @@ def _get_therapist_guidance(q: Session, user_hash: str | None) -> str | None:
 # =============================================================================
 # CHANGE #1: Check for and serve pre-generated audio
 # FIX Issue #8: Search backward for most recent unused pre-gen if exact day not found
+# NOTE: This functionality is DISABLED when AUDIO_GENERATION_ENABLED = False
 # =============================================================================
 
 
@@ -260,6 +272,8 @@ def _check_pre_generated_audio(q: Session, user_hash: str, journey_day: int) -> 
     - Any day mismatch between pre-generation and current session
     
     Returns the PreGeneratedAudio record if found and ready, None otherwise.
+    
+    NOTE: This function is only called when AUDIO_GENERATION_ENABLED = True
     """
     if not user_hash or not journey_day:
         return None
@@ -318,6 +332,8 @@ def _use_pre_generated_audio(
     Use pre-generated audio instead of generating on-demand.
     
     Creates a session record and marks the pre-generated audio as used.
+    
+    NOTE: This function is only called when AUDIO_GENERATION_ENABLED = True
     """
     c = cfg
     
@@ -397,6 +413,7 @@ def _use_pre_generated_audio(
 # =============================================================================
 # FIX: Pre-gen status endpoint for instant playback (frontend checks this first)
 # FIX Issue #8: Also uses fallback search for pre-generated audio
+# NOTE: Returns has_pre_gen: false when AUDIO_GENERATION_ENABLED = False
 # =============================================================================
 
 
@@ -413,6 +430,9 @@ def get_pre_gen_status(
     
     FIX Issue #8: Now also searches backward for unused pre-gen if exact day not found.
     
+    NOTE: When AUDIO_GENERATION_ENABLED = False, this always returns has_pre_gen: false
+    to direct users to the video recommendation flow instead.
+    
     Returns:
         - has_pre_gen: bool - whether pre-generated audio is available
         - audio_url: str | None - the audio URL if available
@@ -421,6 +441,34 @@ def get_pre_gen_status(
         - journey_day: int | None - the journey day this audio is for
     """
     c = cfg
+    
+    # ==========================================================================
+    # AUDIO GENERATION DISABLED
+    # ==========================================================================
+    # When audio generation is disabled, always return has_pre_gen: false
+    # This directs the frontend to use the video recommendation flow instead.
+    # ==========================================================================
+    if not AUDIO_GENERATION_ENABLED:
+        # Get user's journey day for the response
+        try:
+            user = q.query(Users).filter(Users.user_hash == user_hash).first()
+            journey_day = getattr(user, "journey_day", None) or 1 if user else 1
+        except Exception:
+            journey_day = 1
+        
+        print(f"[journey] Audio generation DISABLED. Returning has_pre_gen=false for user {user_hash}")
+        return {
+            "has_pre_gen": False,
+            "audio_url": None,
+            "session_id": None,
+            "duration_ms": None,
+            "journey_day": journey_day,
+            "message": "Audio generation is disabled. Use video recommendations instead.",
+        }
+    
+    # ==========================================================================
+    # AUDIO GENERATION ENABLED (original code below)
+    # ==========================================================================
     
     # Get user's current journey day
     try:
@@ -757,7 +805,28 @@ def get_all_video_suggestions(
 
 @r.post("/api/journey/generate", response_model=GenerateOut)
 def generate(x: IntakeIn, q: Session = Depends(db)):
+    """
+    Generate a journey session.
+    
+    NOTE: When AUDIO_GENERATION_ENABLED = False, this endpoint returns an error
+    directing users to use video recommendations instead.
+    """
     c = cfg
+    
+    # ==========================================================================
+    # AUDIO GENERATION DISABLED CHECK
+    # ==========================================================================
+    if not AUDIO_GENERATION_ENABLED:
+        print(f"[journey] Audio generation DISABLED. Rejecting /generate request.")
+        raise HTTPException(
+            status_code=400,
+            detail="Audio generation is disabled. Please use video recommendations via /api/journey/video-suggestion instead."
+        )
+    
+    # ==========================================================================
+    # AUDIO GENERATION ENABLED (original code below)
+    # ==========================================================================
+    
     st.ensure_dir(c.OUT_DIR)
 
     
