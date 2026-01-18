@@ -83,6 +83,130 @@ def get_intake_flow_config():
 
 
 # ============================================================================
+# INTAKE PROGRESS ENDPOINT (NEW - Issue #3 Fix)
+# ============================================================================
+
+
+class IntakeProgressOut(BaseModel):
+    """Output schema for intake progress status."""
+    demographics_complete: bool = False
+    phq9_complete: bool = False
+    ml_questionnaire_complete: bool = False
+    onboarding_complete: bool = False
+    # Which step to resume from (1=demographics, 2=phq9, 3=ml_questionnaire, 4=done)
+    resume_step: int = 1
+    # Additional details
+    intake_id: Optional[int] = None
+    journey_day: Optional[int] = None
+
+
+@r.get("/progress", response_model=IntakeProgressOut)
+def get_intake_progress(
+    current_user: models.Users = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Get the user's intake progress to determine which step to resume from.
+    
+    This endpoint is called on page refresh during onboarding to avoid
+    forcing users to restart from step 1 if they've already completed
+    some steps.
+    
+    Steps:
+    1. Demographics (age, gender, safety questions)
+    2. PHQ-9 (9 depression screening questions)
+    3. ML Questionnaire (9 personality questions for video personalization)
+    4. Done (onboarding complete)
+    
+    Returns which steps are complete and which step to resume from.
+    """
+    user_hash = current_user.user_hash
+    
+    print(f"[intake] Checking progress for user {user_hash}")
+    
+    # Check if onboarding is already complete
+    if current_user.onboarding_complete:
+        print(f"[intake] User {user_hash} has already completed onboarding")
+        return IntakeProgressOut(
+            demographics_complete=True,
+            phq9_complete=True,
+            ml_questionnaire_complete=True,
+            onboarding_complete=True,
+            resume_step=4,  # Done
+            journey_day=current_user.journey_day,
+        )
+    
+    # Check for existing clinical intake (demographics)
+    intake = (
+        db.query(models.ClinicalIntake)
+        .filter(models.ClinicalIntake.user_hash == user_hash)
+        .order_by(models.ClinicalIntake.created_at.desc())
+        .first()
+    )
+    
+    demographics_complete = False
+    intake_id = None
+    
+    if intake:
+        intake_id = intake.id
+        # Demographics is complete if age and gender are set
+        if intake.age is not None and intake.gender is not None:
+            demographics_complete = True
+            print(f"[intake] Demographics complete for user {user_hash}")
+    
+    # Check for PHQ-9 responses
+    phq9_complete = False
+    if intake:
+        phq9_count = (
+            db.query(models.Phq9ItemResponse)
+            .filter(models.Phq9ItemResponse.intake_id == intake.id)
+            .count()
+        )
+        # PHQ-9 has 9 questions
+        if phq9_count >= 9:
+            phq9_complete = True
+            print(f"[intake] PHQ-9 complete for user {user_hash}")
+    
+    # Check for ML questionnaire
+    ml_questionnaire_complete = False
+    ml_response = (
+        db.query(models.MLQuestionnaireResponse)
+        .filter(models.MLQuestionnaireResponse.user_hash == user_hash)
+        .first()
+    )
+    if ml_response:
+        # ML questionnaire is complete if required fields are set
+        if ml_response.dpes_1 is not None and ml_response.neo_ffi_10 is not None:
+            ml_questionnaire_complete = True
+            print(f"[intake] ML questionnaire complete for user {user_hash}")
+    
+    # Also check user flag
+    if current_user.ml_questionnaire_complete:
+        ml_questionnaire_complete = True
+    
+    # Determine resume step
+    resume_step = 1  # Start from demographics
+    if demographics_complete:
+        resume_step = 2  # Go to PHQ-9
+    if demographics_complete and phq9_complete:
+        resume_step = 3  # Go to ML questionnaire
+    if demographics_complete and phq9_complete and ml_questionnaire_complete:
+        resume_step = 4  # Done
+    
+    print(f"[intake] Progress for user {user_hash}: demographics={demographics_complete}, phq9={phq9_complete}, ml={ml_questionnaire_complete}, resume_step={resume_step}")
+    
+    return IntakeProgressOut(
+        demographics_complete=demographics_complete,
+        phq9_complete=phq9_complete,
+        ml_questionnaire_complete=ml_questionnaire_complete,
+        onboarding_complete=current_user.onboarding_complete or False,
+        resume_step=resume_step,
+        intake_id=intake_id,
+        journey_day=current_user.journey_day,
+    )
+
+
+# ============================================================================
 # ML QUESTIONNAIRE SCHEMAS
 # ============================================================================
 
