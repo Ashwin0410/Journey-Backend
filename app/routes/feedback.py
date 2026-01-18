@@ -12,6 +12,17 @@ from ..models import Feedback, Sessions, Users, PreGeneratedAudio, Suggestions
 r = APIRouter()
 
 
+# =============================================================================
+# AUDIO GENERATION FEATURE FLAG
+# =============================================================================
+# Set to False to disable audio pre-generation for patients.
+# Patients now use ML-recommended videos instead of generated audio.
+# Keep the code for potential future use (e.g., therapist features).
+# =============================================================================
+
+AUDIO_GENERATION_ENABLED = False
+
+
 def db():
     q = SessionLocal()
     try:
@@ -22,6 +33,7 @@ def db():
 
 # =============================================================================
 # CHANGE #8: Pre-generate audio for Day 2+ users
+# NOTE: This functionality is DISABLED when AUDIO_GENERATION_ENABLED = False
 # =============================================================================
 
 
@@ -51,6 +63,8 @@ def _trigger_pre_generation(
     
     This runs in a background thread to not block the feedback response.
     The actual audio generation happens asynchronously.
+    
+    NOTE: This function is only called when AUDIO_GENERATION_ENABLED = True
     """
     # Create a new database session for the background task
     db_session = SessionLocal()
@@ -121,6 +135,8 @@ def _generate_audio_for_record(pre_gen_id: int):
     
     This imports the narrative service to do the actual generation,
     similar to how journey.py generates audio on-demand.
+    
+    NOTE: This function is only called when AUDIO_GENERATION_ENABLED = True
     """
     db_session = SessionLocal()
     
@@ -264,7 +280,11 @@ def _run_pre_generation_in_background(
     session_insight: Optional[str],
     session_id: str,
 ):
-    """Run pre-generation in a separate thread to not block the response."""
+    """
+    Run pre-generation in a separate thread to not block the response.
+    
+    NOTE: This function is only called when AUDIO_GENERATION_ENABLED = True
+    """
     print(f"[feedback] Spawning background thread for pre-generation, user={user_hash}, day={current_journey_day}")
     thread = threading.Thread(
         target=_trigger_pre_generation,
@@ -297,37 +317,49 @@ def submit(x: FeedbackIn, q: Session = Depends(db)):
     
     print(f"[feedback] Saved feedback for session {x.session_id}")
     
-    # CHANGE #8: Trigger pre-generation for Day 2+ users
-    # Get user_hash from the session
-    try:
-        session = q.query(Sessions).filter(Sessions.id == x.session_id).first()
-        if session and session.user_hash:
-            user_hash = session.user_hash
-            current_journey_day = _get_user_journey_day(q, user_hash)
-            
-            print(f"[feedback] User {user_hash} is on journey day {current_journey_day}")
-            
-            # Only pre-generate if user has completed at least day 1
-            if current_journey_day and current_journey_day >= 1:
-                print(f"[feedback] Triggering pre-generation for user {user_hash}, current day {current_journey_day}")
+    # ==========================================================================
+    # AUDIO PRE-GENERATION (DISABLED)
+    # ==========================================================================
+    # Previously, this triggered audio pre-generation for Day 2+ users.
+    # Now disabled because patients use ML-recommended videos instead.
+    # The code is kept but wrapped in a feature flag for potential future use.
+    # ==========================================================================
+    
+    if AUDIO_GENERATION_ENABLED:
+        # CHANGE #8: Trigger pre-generation for Day 2+ users
+        # Get user_hash from the session
+        try:
+            session = q.query(Sessions).filter(Sessions.id == x.session_id).first()
+            if session and session.user_hash:
+                user_hash = session.user_hash
+                current_journey_day = _get_user_journey_day(q, user_hash)
                 
-                # Run in background thread to not block response
-                _run_pre_generation_in_background(
-                    user_hash=user_hash,
-                    current_journey_day=current_journey_day,
-                    emotion_word=x.emotion_word,
-                    chills_detail=x.chills_detail,
-                    session_insight=x.session_insight,
-                    session_id=x.session_id,
-                )
+                print(f"[feedback] User {user_hash} is on journey day {current_journey_day}")
+                
+                # Only pre-generate if user has completed at least day 1
+                if current_journey_day and current_journey_day >= 1:
+                    print(f"[feedback] Triggering pre-generation for user {user_hash}, current day {current_journey_day}")
+                    
+                    # Run in background thread to not block response
+                    _run_pre_generation_in_background(
+                        user_hash=user_hash,
+                        current_journey_day=current_journey_day,
+                        emotion_word=x.emotion_word,
+                        chills_detail=x.chills_detail,
+                        session_insight=x.session_insight,
+                        session_id=x.session_id,
+                    )
+                else:
+                    print(f"[feedback] Skipping pre-generation - journey_day is {current_journey_day}")
             else:
-                print(f"[feedback] Skipping pre-generation - journey_day is {current_journey_day}")
-        else:
-            print(f"[feedback] Skipping pre-generation - no session or user_hash found for {x.session_id}")
-    except Exception as e:
-        # Don't fail the feedback submission if pre-generation fails
-        print(f"[feedback] Error triggering pre-generation: {e}")
-        traceback.print_exc()
+                print(f"[feedback] Skipping pre-generation - no session or user_hash found for {x.session_id}")
+        except Exception as e:
+            # Don't fail the feedback submission if pre-generation fails
+            print(f"[feedback] Error triggering pre-generation: {e}")
+            traceback.print_exc()
+    else:
+        # Audio generation is disabled - patients use ML-recommended videos
+        print(f"[feedback] Audio pre-generation is DISABLED (AUDIO_GENERATION_ENABLED=False). Patients use video recommendations instead.")
     
     return {"ok": True}
 
