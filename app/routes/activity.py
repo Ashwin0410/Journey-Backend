@@ -360,7 +360,34 @@ def _generate_activities_via_llm(
 
     # =============================================================================
     # CHANGE 5: Updated system message - ALL 6 activities must be PLACE-BASED
+    # FIX: Added fallback instructions when no nearby places are available
     # =============================================================================
+    
+    # Check if we have nearby places
+    has_nearby_places = len(all_nearby_places) > 0
+    
+    if has_nearby_places:
+        place_instruction = (
+            "CRITICAL: ALL 6 activities MUST use a real place from the nearby_* lists.\n"
+            "You MUST use the exact name from the provided nearby_* lists.\n"
+            "Do NOT invent or tweak place names.\n"
+            "Do NOT suggest 'at home' or 'anywhere comfortable' - every activity needs a real location.\n\n"
+        )
+    else:
+        # FIX: When no GPS/location is available, use generic but specific place types
+        place_instruction = (
+            "IMPORTANT: No specific nearby places were provided, but ALL activities MUST still be place-based.\n"
+            "Use SPECIFIC generic place names like:\n"
+            "- 'the nearest park' or 'a local park'\n"
+            "- 'a nearby cafe' or 'the local coffee shop'\n"
+            "- 'the neighborhood library'\n"
+            "- 'a local restaurant'\n"
+            "- 'the nearest gym or fitness center'\n"
+            "- 'a nearby shopping area'\n"
+            "Do NOT use vague terms like 'anywhere comfortable' or 'at home'.\n"
+            "Each activity MUST specify a type of place to visit.\n\n"
+        )
+    
     system_msg = (
         "You are a behavioural activation coach designing very small, realistic, "
         "real-world activities for a mental health app.\n"
@@ -368,11 +395,8 @@ def _generate_activities_via_llm(
         "- concrete and doable in 5–30 minutes\n"
         "- safe and gentle (no extreme exercise, no unsafe locations)\n"
         "- described in simple language\n"
-        "- AT A REAL NEARBY PLACE from the provided lists\n\n"
-        "CRITICAL: ALL 6 activities MUST use a real place from the nearby_* lists.\n"
-        "You MUST use the exact name from the provided nearby_* lists.\n"
-        "Do NOT invent or tweak place names.\n"
-        "Do NOT suggest 'at home' or 'anywhere comfortable' - every activity needs a real location.\n\n"
+        "- AT A REAL PLACE (not at home)\n\n"
+        f"{place_instruction}"
         "MATCH PLACE TYPE TO THE ACTIVITY GOAL:\n"
         "- Movement / steps / walk / exercise -> prefer parks or gyms\n"
         "- Connection / talking / social -> prefer cafes or restaurants\n"
@@ -392,7 +416,7 @@ def _generate_activities_via_llm(
     user_msg = (
         f"User context: {context_text}\n\n"
         "Generate EXACTLY 6 PLACE-BASED activities.\n"
-        "EVERY activity MUST be at a real nearby place from the lists provided.\n"
+        "EVERY activity MUST be at a real place (park, cafe, library, gym, etc.) - NOT at home.\n"
         "Use different place types across the 6 activities for variety.\n\n"
         "Return ONLY JSON in this exact format (no extra commentary):\n"
         "{\n"
@@ -404,7 +428,7 @@ def _generate_activities_via_llm(
         '      \"effort_level\": \"low | medium | high\",\n'
         '      \"reward_type\": \"calm | connection | mastery | movement | other\",\n'
         '      \"default_duration_min\": 5,\n'
-        '      \"location_label\": \"EXACT place name from nearby lists - REQUIRED\",\n'
+        '      \"location_label\": \"EXACT place name from nearby lists OR specific place type like the nearest park - REQUIRED\",\n'
         '      \"tags\": [\"+ PlaceBased\", \"BA flavour like Movement/Connection\"]\n'
         "    }\n"
         "  ]\n"
@@ -462,7 +486,7 @@ def _generate_activities_via_llm(
             place_id: Optional[str] = None
             
             # First, try to find coordinates for the LLM-generated location_label
-            if location_label:
+            if location_label and all_nearby_places:
                 place_detail = _find_place_by_name(location_label, all_nearby_places)
                 if place_detail:
                     lat = place_detail["lat"]
@@ -475,19 +499,32 @@ def _generate_activities_via_llm(
             # FIX Issue #2: If no location or no match, use the first available place WITH coordinates
             if not location_label or (lat is None and all_nearby_places):
                 if all_nearby_places:
-                    fallback_place = all_nearby_places[0]
+                    # Use different places for different activities to add variety
+                    place_idx = idx % len(all_nearby_places)
+                    fallback_place = all_nearby_places[place_idx]
                     location_label = fallback_place["name"]
                     lat = fallback_place["lat"]
                     lng = fallback_place["lng"]
                     place_id = fallback_place["place_id"]
                     print(f"[activity] Using fallback location '{location_label}' -> lat={lat}, lng={lng}")
+                elif gps_lat is not None and gps_lng is not None:
+                    # No nearby places but have GPS - keep the LLM-generated location label
+                    # and use GPS coords so map can at least show approximate area
+                    lat = gps_lat
+                    lng = gps_lng
+                    if not location_label or location_label.lower() in ["nearby", "anywhere", "anywhere comfortable", "at home"]:
+                        # FIX: Replace generic labels with specific place types
+                        place_types = ["the nearest park", "a local cafe", "the neighborhood library", 
+                                      "a nearby restaurant", "a local gym", "a nearby shopping area"]
+                        location_label = place_types[idx % len(place_types)]
+                    print(f"[activity] No nearby places, using GPS coords with label '{location_label}' -> lat={lat}, lng={lng}")
                 else:
-                    # No nearby places available - use generic label but include GPS coords if available
-                    location_label = "Nearby"
-                    if gps_lat is not None and gps_lng is not None:
-                        lat = gps_lat
-                        lng = gps_lng
-                        print(f"[activity] No nearby places, using GPS coords -> lat={lat}, lng={lng}")
+                    # FIX: No GPS and no nearby places - use specific place type labels (not generic)
+                    place_types = ["the nearest park", "a local cafe", "the neighborhood library", 
+                                  "a nearby restaurant", "a local gym", "a nearby shopping area"]
+                    if not location_label or location_label.lower() in ["nearby", "anywhere", "anywhere comfortable", "at home"]:
+                        location_label = place_types[idx % len(place_types)]
+                    print(f"[activity] No location data, using generic place type: '{location_label}'")
 
             act = schemas.ActivityBase(
                 title=title,
@@ -1732,7 +1769,7 @@ def generate_from_action(
     if not action_today:
         raise HTTPException(status_code=400, detail="action_today is required")
     
-    print(f"[activity] /from-action called for user {user_hash}, action='{action_today}', session={session_id}")
+    print(f"[activity] /from-action called for user {user_hash}, action='{action_today}', session={session_id}, gps=({gps_lat}, {gps_lng})")
     
     # Get postal code from user if not provided via GPS
     postal_code = None
@@ -1741,6 +1778,7 @@ def generate_from_action(
             user = db.query(models.Users).filter(models.Users.user_hash == user_hash).first()
             if user and getattr(user, 'postal_code', None):
                 postal_code = user.postal_code
+                print(f"[activity] Using postal_code from user profile: {postal_code}")
         except Exception:
             pass
     
