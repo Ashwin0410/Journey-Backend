@@ -623,12 +623,6 @@ def _extract_youtube_video_id(url: str) -> Optional[str]:
     return None
 
 
-# =============================================================================
-# FIX Issue #11: Aligned video-suggestion with intake.py wrapping logic
-# Day N = Rank #((N-1) % 10) + 1 video
-# This ensures consistency between /api/intake/video-for-today and this endpoint
-# =============================================================================
-
 @r.get("/api/journey/video-suggestion")
 def get_video_suggestion(
     user_hash: str = Query(..., description="User hash to get video suggestion for"),
@@ -639,12 +633,6 @@ def get_video_suggestion(
     
     This endpoint returns the video recommendation for the user's current journey day.
     Day 1 = rank #1 video, Day 2 = rank #2 video, etc.
-    
-    FIX Issue #11: Now wraps around after 10 days (same as /api/intake/video-for-today):
-    - Day 1-10: rank 1-10
-    - Day 11: rank 1 (wraps)
-    - Day 12: rank 2
-    - etc.
     
     The video suggestions are generated when the user completes the ML questionnaire
     (/api/intake/ml-questionnaire) and stored in the stimuli_suggestions table.
@@ -667,31 +655,24 @@ def get_video_suggestion(
         
         journey_day = getattr(user, "journey_day", None) or 1
         
-        # =============================================================================
-        # FIX Issue #11: Use same wrapping logic as intake.py
-        # This ensures Day 11 gets rank 1, Day 12 gets rank 2, etc.
-        # =============================================================================
-        effective_rank = ((journey_day - 1) % 10) + 1
-        
-        print(f"[journey] Video suggestion: journey_day={journey_day}, effective_rank={effective_rank}")
-        
-        # Get the video suggestion for this day using effective_rank
+        # Get the video suggestion for this day
+        # Day 1 = rank 1, Day 2 = rank 2, etc.
         suggestion = (
             q.query(StimuliSuggestion)
             .filter(
                 StimuliSuggestion.user_hash == user_hash,
-                StimuliSuggestion.stimulus_rank == effective_rank,
+                StimuliSuggestion.stimulus_rank == journey_day,
             )
             .first()
         )
         
-        # If no exact match, try to get the highest available rank <= effective_rank
+        # If no exact match, try to get the highest available rank <= journey_day
         if not suggestion:
             suggestion = (
                 q.query(StimuliSuggestion)
                 .filter(
                     StimuliSuggestion.user_hash == user_hash,
-                    StimuliSuggestion.stimulus_rank <= effective_rank,
+                    StimuliSuggestion.stimulus_rank <= journey_day,
                 )
                 .order_by(StimuliSuggestion.stimulus_rank.desc())
                 .first()
@@ -735,7 +716,7 @@ def get_video_suggestion(
         embed_url = f"https://www.youtube.com/embed/{video_id}" if video_id else None
         thumbnail_url = f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg" if video_id else None
         
-        print(f"[journey] Video suggestion for user {user_hash} day {journey_day} (rank {effective_rank}): {suggestion.stimulus_name}")
+        print(f"[journey] Video suggestion for user {user_hash} day {journey_day}: {suggestion.stimulus_name}")
         
         return {
             "has_video": True,
