@@ -172,6 +172,23 @@ def _validate_session(db_session: Session, session_id: str) -> Sessions:
     return session
 
 
+def _get_user_hash_from_session(db_session: Session, session_id: str) -> Optional[str]:
+    """
+    Get user_hash from a session ID.
+    
+    Args:
+        db_session: Database session
+        session_id: Session ID
+    
+    Returns:
+        user_hash if found, None otherwise
+    """
+    session = db_session.query(Sessions).filter(Sessions.id == session_id).first()
+    if session:
+        return session.user_hash
+    return None
+
+
 def _get_action_for_activity_generation(response: PostVideoResponse) -> Optional[str]:
     """
     Extract the action text that should be used for activity generation.
@@ -276,8 +293,8 @@ def record_body_map_spot(x: BodyMapSpotIn, q: Session = Depends(db)):
     """
     Record a single body map spot.
     
-    Called when user taps on the body silhouette to mark
-    where they felt chills/goosebumps.
+    Called when user taps on the body figure to indicate
+    where they felt the chills physically.
     
     Args:
         x: BodyMapSpotIn with session_id, x_percent, y_percent
@@ -316,8 +333,8 @@ def record_body_map_spots_batch(x: BodyMapBatchIn, q: Session = Depends(db)):
     """
     Record multiple body map spots at once.
     
-    More efficient than individual calls when user marks
-    multiple spots on the body map.
+    More efficient than calling /bodymap multiple times.
+    Used when user has tapped multiple locations.
     
     Args:
         x: BodyMapBatchIn with session_id and list of spots
@@ -329,34 +346,25 @@ def record_body_map_spots_batch(x: BodyMapBatchIn, q: Session = Depends(db)):
     # Validate session exists
     _validate_session(q, x.session_id)
     
-    created_count = 0
+    # Create all spots
+    created_spots = []
     for spot_data in x.spots:
-        x_pct = spot_data.get("x_percent", spot_data.get("x"))
-        y_pct = spot_data.get("y_percent", spot_data.get("y"))
-        
-        if x_pct is None or y_pct is None:
-            continue
-        
-        # Validate range
-        if not (0 <= x_pct <= 100 and 0 <= y_pct <= 100):
-            continue
-        
         spot = BodyMapSpot(
             session_id=x.session_id,
-            x_percent=float(x_pct),
-            y_percent=float(y_pct),
+            x_percent=spot_data.get("x_percent", 0),
+            y_percent=spot_data.get("y_percent", 0),
             created_at=datetime.utcnow(),
         )
         q.add(spot)
-        created_count += 1
+        created_spots.append(spot)
     
     q.commit()
     
-    print(f"[chills] Recorded {created_count} body map spots for session {x.session_id}")
+    print(f"[chills] Recorded {len(created_spots)} body map spots for session {x.session_id}")
     
     return {
         "ok": True,
-        "created": created_count,
+        "count": len(created_spots),
         "session_id": x.session_id,
     }
 
@@ -376,7 +384,6 @@ def get_body_map_spots(session_id: str, q: Session = Depends(db)):
     spots = (
         q.query(BodyMapSpot)
         .filter(BodyMapSpot.session_id == session_id)
-        .order_by(BodyMapSpot.created_at.asc())
         .all()
     )
     
@@ -397,7 +404,7 @@ def clear_body_map_spots(session_id: str, q: Session = Depends(db)):
     """
     Clear all body map spots for a session.
     
-    Called when user presses "Clear" button on body map.
+    Useful if user wants to redo their body map selection.
     
     Args:
         session_id: Session ID
@@ -446,6 +453,9 @@ def record_post_video_response(x: PostVideoResponseIn, q: Session = Depends(db))
     # Validate session exists
     session = _validate_session(q, x.session_id)
     
+    # Get user_hash from session
+    user_hash = _get_user_hash_from_session(q, x.session_id)
+    
     # Check if response already exists (update instead of create)
     existing = (
         q.query(PostVideoResponse)
@@ -460,6 +470,7 @@ def record_post_video_response(x: PostVideoResponseIn, q: Session = Depends(db))
         existing.value_custom = x.value_custom
         existing.action_selected = x.action_selected
         existing.action_custom = x.action_custom
+        existing.user_hash = user_hash  # FIX: Set user_hash on update
         q.commit()
         q.refresh(existing)
         
@@ -470,6 +481,7 @@ def record_post_video_response(x: PostVideoResponseIn, q: Session = Depends(db))
         # Create new response
         response = PostVideoResponse(
             session_id=x.session_id,
+            user_hash=user_hash,  # FIX: Set user_hash on create
             insights_text=x.insights_text,
             value_selected=x.value_selected,
             value_custom=x.value_custom,
