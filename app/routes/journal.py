@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from ..db import SessionLocal
-from ..models import JournalEntries, ActivitySessions
+from ..models import JournalEntries, ActivitySessions, Activities
 from ..schemas import (
     JournalEntryIn,
     JournalEntryOut,
@@ -92,45 +92,156 @@ def get_journal_timeline(
 ):
     """
     Get journal timeline with stats.
-    FIX Issues #1 & #4: Now returns stats (day_streak, activities_completed) from ActivitySessions table.
+    
+    FIX Issue #10: Now includes completed activities from ActivitySessions table,
+    not just explicit JournalEntries. This ensures completed activities appear
+    in the timeline even if no journal entry was manually created.
     """
     today = datetime.utcnow().date()
+    
+    # Get existing journal entries
     rows: List[JournalEntries] = (
         q.query(JournalEntries)
         .filter(JournalEntries.user_hash == user_hash)
         .order_by(JournalEntries.date.asc(), JournalEntries.id.asc())
         .all()
     )
-    future: List[JournalEntryOut] = []
-    today_list: List[JournalEntryOut] = []
-    past: List[JournalEntryOut] = []
+    
+    future: List[Dict[str, Any]] = []
+    today_list: List[Dict[str, Any]] = []
+    past: List[Dict[str, Any]] = []
+    
+    # Track which activity_ids already have journal entries to avoid duplicates
+    activity_ids_with_entries = set()
+    
     for row in rows:
         item = _row_to_schema(row)
+        item_dict = _entry_to_dict(item)
+        
+        # Track activity IDs that have journal entries
+        if item.entry_type == "activity" and item.meta:
+            activity_id = item.meta.get("activity_id")
+            if activity_id:
+                activity_ids_with_entries.add(activity_id)
+        
         if item.date > today:
-            future.append(item)
+            future.append(item_dict)
         elif item.date == today:
-            today_list.append(item)
+            today_list.append(item_dict)
         else:
-            past.append(item)
-    past.sort(key=lambda e: (e.date, e.id), reverse=True)
+            past.append(item_dict)
+    
+    # ==========================================================================
+    # FIX Issue #10: Include completed activities from ActivitySessions
+    # This ensures completed activities show up even without explicit journal entries
+    # ==========================================================================
+    completed_activities = _get_completed_activities_as_entries(q, user_hash, activity_ids_with_entries)
+    
+    for activity_entry in completed_activities:
+        entry_date = activity_entry.get("date")
+        if isinstance(entry_date, str):
+            entry_date = date.fromisoformat(entry_date)
+        
+        if entry_date and entry_date > today:
+            future.append(activity_entry)
+        elif entry_date and entry_date == today:
+            today_list.append(activity_entry)
+        elif entry_date:
+            past.append(activity_entry)
+    
+    # Sort past entries by date descending, then by id descending
+    past.sort(key=lambda e: (e.get("date", ""), e.get("id", 0)), reverse=True)
+    
+    # Sort today entries by id descending (most recent first)
+    today_list.sort(key=lambda e: e.get("id", 0), reverse=True)
     
     # FIX Issues #1 & #4: Calculate stats from ActivitySessions
     day_streak = _calculate_day_streak(q, user_hash)
     activities_completed = _calculate_activities_completed(q, user_hash)
     
-    # FIX Issues #1 & #4: Log stats for debugging
-    print(f"[journal] Timeline stats for user {user_hash}: day_streak={day_streak}, activities_completed={activities_completed}")
+    # FIX Issue #10: Log stats for debugging
+    print(f"[journal] Timeline for user {user_hash}: {len(past)} past, {len(today_list)} today, {len(future)} future")
+    print(f"[journal] Stats: day_streak={day_streak}, activities_completed={activities_completed}")
     
-    # Return as dict with stats (not using response_model to allow flexible return)
     return {
-        "future": [_entry_to_dict(e) for e in future],
-        "today": [_entry_to_dict(e) for e in today_list],
-        "past": [_entry_to_dict(e) for e in past],
+        "future": future,
+        "today": today_list,
+        "past": past,
         "stats": {
             "day_streak": day_streak,
             "activities_completed": activities_completed,
         }
     }
+
+
+def _get_completed_activities_as_entries(
+    q: Session, 
+    user_hash: str, 
+    exclude_activity_ids: set
+) -> List[Dict[str, Any]]:
+    """
+    FIX Issue #10: Get completed activities as timeline entries.
+    
+    Converts completed ActivitySessions into timeline entry format,
+    excluding any activities that already have explicit journal entries.
+    """
+    # Get completed activity sessions with activity details
+    completed_sessions = (
+        q.query(ActivitySessions, Activities)
+        .join(Activities, ActivitySessions.activity_id == Activities.id)
+        .filter(
+            ActivitySessions.user_hash == user_hash,
+            ActivitySessions.status == "completed",
+            ActivitySessions.completed_at.isnot(None),
+        )
+        .order_by(ActivitySessions.completed_at.desc())
+        .all()
+    )
+    
+    entries = []
+    seen_activity_ids = set()  # Avoid duplicate entries for same activity
+    
+    for session, activity in completed_sessions:
+        # Skip if this activity already has a journal entry
+        if activity.id in exclude_activity_ids:
+            continue
+        
+        # Skip duplicate completions of same activity (show most recent only)
+        if activity.id in seen_activity_ids:
+            continue
+        seen_activity_ids.add(activity.id)
+        
+        # Convert completed_at to date
+        completed_date = None
+        if session.completed_at:
+            if isinstance(session.completed_at, datetime):
+                completed_date = session.completed_at.date()
+            else:
+                completed_date = session.completed_at
+        
+        # Build entry in same format as journal entries
+        entry = {
+            "id": -session.id,  # Negative ID to distinguish from journal entries
+            "user_hash": user_hash,
+            "entry_type": "activity_completed",
+            "body": activity.description or "",
+            "title": activity.title or "Completed Activity",
+            "session_id": session.session_id,
+            "meta": {
+                "activity_id": activity.id,
+                "activity_session_id": session.id,
+                "location_label": activity.location_label,
+                "life_area": activity.life_area,
+                "effort_level": activity.effort_level,
+                "completed_at": session.completed_at.isoformat() if session.completed_at else None,
+                "source": "activity_session",  # Indicates this came from ActivitySessions
+            },
+            "date": completed_date.isoformat() if completed_date else None,
+        }
+        entries.append(entry)
+    
+    print(f"[journal] Found {len(entries)} completed activities without journal entries for user {user_hash}")
+    return entries
 
 
 def _entry_to_dict(entry: JournalEntryOut) -> Dict[str, Any]:
@@ -311,3 +422,33 @@ def get_today_journal_entry(
     if row:
         return _row_to_schema(row)
     return None
+
+
+# ==========================================================================
+# FIX Issue #10: New endpoint to get timeline stats only (lightweight)
+# ==========================================================================
+
+@r.get("/api/journey/journal/stats")
+def get_journal_stats(
+    user_hash: str = Query(...),
+    q: Session = Depends(db),
+):
+    """
+    Get just the timeline stats without full entry list.
+    Useful for dashboard displays that only need stats.
+    """
+    day_streak = _calculate_day_streak(q, user_hash)
+    activities_completed = _calculate_activities_completed(q, user_hash)
+    
+    # Get count of journal entries
+    journal_count = (
+        q.query(func.count(JournalEntries.id))
+        .filter(JournalEntries.user_hash == user_hash)
+        .scalar()
+    ) or 0
+    
+    return {
+        "day_streak": day_streak,
+        "activities_completed": activities_completed,
+        "journal_entries": journal_count,
+    }
