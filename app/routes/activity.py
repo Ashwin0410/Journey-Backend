@@ -224,14 +224,9 @@ def _generate_activities_via_llm(
     # Store full place details (with coordinates) not just names
     nearby_parks: List[PlaceDetail] = []
     nearby_cafes: List[PlaceDetail] = []
-    nearby_attractions: List[PlaceDetail] = []
-    nearby_malls: List[PlaceDetail] = []
-    nearby_theatres: List[PlaceDetail] = []
+    nearby_restaurants: List[PlaceDetail] = []
     nearby_libraries: List[PlaceDetail] = []
     nearby_gyms: List[PlaceDetail] = []
-    nearby_restaurants: List[PlaceDetail] = []
-    nearby_museums: List[PlaceDetail] = []
-    nearby_spas: List[PlaceDetail] = []
 
     coords: Optional[Tuple[float, float]] = None
     
@@ -245,70 +240,46 @@ def _generate_activities_via_llm(
     if coords:
         lat, lng = coords
 
-        # CHANGE 5: Fetch more place types to ensure ALL activities can be place-based
+        # =============================================================================
+        # FIX Issue #5: Reduced from 10 to 5 place types to speed up activity generation
+        # This cuts API calls in half and significantly improves response time
+        # =============================================================================
         nearby_parks = _nearby_places(lat, lng, "park", max_results=5)
         nearby_cafes = _nearby_places(lat, lng, "cafe", max_results=5)
-        nearby_attractions = _nearby_places(lat, lng, "tourist_attraction", max_results=5)
-        nearby_malls = _nearby_places(lat, lng, "shopping_mall", max_results=5)
-        nearby_theatres = _nearby_places(lat, lng, "movie_theater", max_results=5)
+        nearby_restaurants = _nearby_places(lat, lng, "restaurant", max_results=5)
         nearby_libraries = _nearby_places(lat, lng, "library", max_results=5)
         nearby_gyms = _nearby_places(lat, lng, "gym", max_results=5)
-        nearby_restaurants = _nearby_places(lat, lng, "restaurant", max_results=5)
-        nearby_museums = _nearby_places(lat, lng, "museum", max_results=5)
-        nearby_spas = _nearby_places(lat, lng, "spa", max_results=5)
 
         # Extract names for LLM prompt
         park_names = _get_place_names(nearby_parks)
         cafe_names = _get_place_names(nearby_cafes)
-        attraction_names = _get_place_names(nearby_attractions)
-        mall_names = _get_place_names(nearby_malls)
-        theatre_names = _get_place_names(nearby_theatres)
+        restaurant_names = _get_place_names(nearby_restaurants)
         library_names = _get_place_names(nearby_libraries)
         gym_names = _get_place_names(nearby_gyms)
-        restaurant_names = _get_place_names(nearby_restaurants)
-        museum_names = _get_place_names(nearby_museums)
-        spa_names = _get_place_names(nearby_spas)
 
         if park_names:
             context_bits.append("nearby_parks: " + ", ".join(park_names))
         if cafe_names:
             context_bits.append("nearby_cafes: " + ", ".join(cafe_names))
-        if attraction_names:
-            context_bits.append("nearby_attractions: " + ", ".join(attraction_names))
-        if mall_names:
-            context_bits.append("nearby_malls: " + ", ".join(mall_names))
-        if theatre_names:
-            context_bits.append("nearby_theatres: " + ", ".join(theatre_names))
+        if restaurant_names:
+            context_bits.append("nearby_restaurants: " + ", ".join(restaurant_names))
         if library_names:
             context_bits.append("nearby_libraries: " + ", ".join(library_names))
         if gym_names:
             context_bits.append("nearby_gyms: " + ", ".join(gym_names))
-        if restaurant_names:
-            context_bits.append("nearby_restaurants: " + ", ".join(restaurant_names))
-        if museum_names:
-            context_bits.append("nearby_museums: " + ", ".join(museum_names))
-        if spa_names:
-            context_bits.append("nearby_spas: " + ", ".join(spa_names))
 
     # Combine all places for coordinate lookup later
     all_nearby_places: List[PlaceDetail] = (
         nearby_parks
         + nearby_cafes
-        + nearby_attractions
-        + nearby_malls
-        + nearby_theatres
+        + nearby_restaurants
         + nearby_libraries
         + nearby_gyms
-        + nearby_restaurants
-        + nearby_museums
-        + nearby_spas
     )
 
     print(
         f"[activity] nearby counts – parks={len(nearby_parks)}, cafes={len(nearby_cafes)}, "
-        f"attractions={len(nearby_attractions)}, malls={len(nearby_malls)}, "
-        f"theatres={len(nearby_theatres)}, libraries={len(nearby_libraries)}, gyms={len(nearby_gyms)}, "
-        f"restaurants={len(nearby_restaurants)}, museums={len(nearby_museums)}, spas={len(nearby_spas)}"
+        f"restaurants={len(nearby_restaurants)}, libraries={len(nearby_libraries)}, gyms={len(nearby_gyms)}"
     )
 
     context_text = "; ".join(context_bits) or "no extra context provided"
@@ -400,10 +371,10 @@ def _generate_activities_via_llm(
         "MATCH PLACE TYPE TO THE ACTIVITY GOAL:\n"
         "- Movement / steps / walk / exercise -> prefer parks or gyms\n"
         "- Connection / talking / social -> prefer cafes or restaurants\n"
-        "- Relaxation / recharging / entertainment -> prefer malls, theatres, spas, or attractions\n"
+        "- Relaxation / recharging / entertainment -> prefer cafes or restaurants\n"
         "- Focus / work / study / reading -> prefer libraries or quiet cafes\n"
-        "- Culture / inspiration / learning -> prefer museums or attractions\n"
-        "- Self-care / wellness -> prefer spas, gyms, or parks\n\n"
+        "- Culture / inspiration / learning -> prefer libraries or parks\n"
+        "- Self-care / wellness -> prefer gyms or parks\n\n"
         "Vary the place types across all 6 activities for diversity.\n"
         "Use BA flavours like Movement, Connection, Creative, Grounding, or Self-compassion.\n"
         f"{chills_hint}"
@@ -858,6 +829,48 @@ def _get_therapist_suggested_activities_for_patient(
     except Exception as e:
         print(f"[activity] Error getting therapist suggested activities: {e}")
         return []
+
+
+# =============================================================================
+# FIX Issue #10: Helper function to create timeline entry for completed activity
+# =============================================================================
+
+def _create_timeline_entry_for_completed_activity(
+    db: Session,
+    *,
+    user_hash: str,
+    activity: models.Activities,
+) -> Optional[models.JournalEntries]:
+    """
+    Create a journal/timeline entry when an activity is completed.
+    This ensures completed activities appear in the user's timeline.
+    """
+    try:
+        now = datetime.utcnow()
+        
+        # Create a journal entry for the completed activity
+        entry = models.JournalEntries(
+            user_hash=user_hash,
+            entry_type="activity_completed",
+            title=f"Completed: {activity.title}",
+            content=activity.description or "",
+            mood=None,
+            tags_json=activity.tags_json,
+            activity_id=activity.id,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(entry)
+        db.commit()
+        db.refresh(entry)
+        
+        print(f"[activity] Created timeline entry for completed activity '{activity.title}' (entry_id={entry.id})")
+        return entry
+        
+    except Exception as e:
+        print(f"[activity] Error creating timeline entry: {e}")
+        # Don't fail the completion if timeline entry creation fails
+        return None
 
 
 
@@ -1397,6 +1410,7 @@ def start_activity(
 # FIX Issue #3b & #5: Enhanced /complete endpoint
 # - Properly marks activity as completed
 # - Returns next_activity for frontend to display after completion
+# FIX Issue #10: Creates timeline entry for completed activity
 # =============================================================================
 
 @r.post("/complete", summary="Complete Activity")
@@ -1453,6 +1467,22 @@ def complete_activity(
     session_row.completed_at = datetime.utcnow()
     db.commit()
     db.refresh(session_row)
+
+    # =============================================================================
+    # FIX Issue #10: Create timeline entry for the completed activity
+    # =============================================================================
+    completed_activity = (
+        db.query(models.Activities)
+        .filter(models.Activities.id == activity_id)
+        .first()
+    )
+    
+    if completed_activity:
+        _create_timeline_entry_for_completed_activity(
+            db,
+            user_hash=payload.user_hash,
+            activity=completed_activity,
+        )
 
     # =============================================================================
     # FIX Issue #5: Generate and return next activity after completion
