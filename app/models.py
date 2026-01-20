@@ -869,6 +869,11 @@ class ChillsTimestamp(Base):
     # Time in the video when chills occurred (seconds)
     video_time_seconds = Column(Float, nullable=False)
     
+    # =============================================================================
+    # NEW FIELD: Video name for tracking which video was being watched
+    # =============================================================================
+    video_name = Column(String, nullable=True)
+    
     # Optional: intensity if we add a slider later
     intensity = Column(Integer, nullable=True)  # 1-5 scale
     
