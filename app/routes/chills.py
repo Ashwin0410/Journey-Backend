@@ -55,6 +55,12 @@ class ChillsTimestampIn(BaseModel):
         ge=0,
         description="Video playback time in seconds when chills were felt"
     )
+    # NEW: Video name for tracking which video was being watched
+    video_name: Optional[str] = Field(
+        None,
+        max_length=500,
+        description="Name/title of the video being watched"
+    )
 
 
 class ChillsTimestampOut(BaseModel):
@@ -62,6 +68,7 @@ class ChillsTimestampOut(BaseModel):
     id: int
     session_id: str
     video_time_seconds: float
+    video_name: Optional[str] = None  # NEW: Include video name in response
     created_at: datetime
 
 
@@ -152,9 +159,34 @@ class SessionChillsSummary(BaseModel):
 # HELPER FUNCTIONS
 # ============================================================================
 
+def _validate_session_optional(db_session: Session, session_id: str) -> Optional[Sessions]:
+    """
+    Optionally validate that a session exists in the old Sessions table.
+    
+    IMPORTANT: The frontend generates client-side UUIDs for video sessions,
+    which don't exist in the old Sessions table. This function now returns
+    None instead of raising 404 to support client-generated session IDs.
+    
+    Args:
+        db_session: Database session
+        session_id: Session ID to validate
+    
+    Returns:
+        Sessions object if found, None otherwise (no longer raises 404)
+    """
+    session = db_session.query(Sessions).filter(Sessions.id == session_id).first()
+    if not session:
+        # Log but don't fail - session_id is likely a client-generated UUID
+        print(f"[chills] Session not in Sessions table (client-generated UUID): {session_id}")
+    return session
+
+
 def _validate_session(db_session: Session, session_id: str) -> Sessions:
     """
     Validate that a session exists.
+    
+    NOTE: This now uses soft validation for chills-related operations.
+    For strict validation, use in post-video response only.
     
     Args:
         db_session: Database session
@@ -164,10 +196,13 @@ def _validate_session(db_session: Session, session_id: str) -> Sessions:
         Sessions object if found
     
     Raises:
-        HTTPException: If session not found
+        HTTPException: If session not found (only for strict endpoints)
     """
     session = db_session.query(Sessions).filter(Sessions.id == session_id).first()
     if not session:
+        # For backward compatibility, still raise for strict endpoints
+        # But log the session_id for debugging
+        print(f"[chills] Session validation failed for: {session_id}")
         raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
     return session
 
@@ -224,32 +259,38 @@ def record_chills_timestamp(x: ChillsTimestampIn, q: Session = Depends(db)):
     Called each time user presses the "I feel chills!" button.
     Multiple timestamps can be recorded per session.
     
+    NOTE: Session validation is now soft - we accept client-generated UUIDs
+    that may not exist in the old Sessions table.
+    
     Args:
-        x: ChillsTimestampIn with session_id and video_time_seconds
+        x: ChillsTimestampIn with session_id, video_time_seconds, and optional video_name
         q: Database session
     
     Returns:
         Created ChillsTimestamp record
     """
-    # Validate session exists
-    _validate_session(q, x.session_id)
+    # Soft validation - don't fail if session doesn't exist in old table
+    # The frontend generates client-side UUIDs for video sessions
+    _validate_session_optional(q, x.session_id)
     
-    # Create timestamp record
+    # Create timestamp record with video_name
     timestamp = ChillsTimestamp(
         session_id=x.session_id,
         video_time_seconds=x.video_time_seconds,
+        video_name=x.video_name,  # NEW: Store video name
         created_at=datetime.utcnow(),
     )
     q.add(timestamp)
     q.commit()
     q.refresh(timestamp)
     
-    print(f"[chills] Recorded timestamp for session {x.session_id} at {x.video_time_seconds}s")
+    print(f"[chills] Recorded timestamp for session {x.session_id} at {x.video_time_seconds}s (video: {x.video_name})")
     
     return ChillsTimestampOut(
         id=timestamp.id,
         session_id=timestamp.session_id,
         video_time_seconds=timestamp.video_time_seconds,
+        video_name=getattr(timestamp, 'video_name', None),  # NEW: Return video name
         created_at=timestamp.created_at,
     )
 
@@ -278,6 +319,7 @@ def get_chills_timestamps(session_id: str, q: Session = Depends(db)):
             id=t.id,
             session_id=t.session_id,
             video_time_seconds=t.video_time_seconds,
+            video_name=getattr(t, 'video_name', None),  # NEW: Return video name
             created_at=t.created_at,
         )
         for t in timestamps
@@ -303,8 +345,8 @@ def record_body_map_spot(x: BodyMapSpotIn, q: Session = Depends(db)):
     Returns:
         Created BodyMapSpot record
     """
-    # Validate session exists
-    _validate_session(q, x.session_id)
+    # Soft validation - don't fail for client-generated session IDs
+    _validate_session_optional(q, x.session_id)
     
     # Create body map spot
     spot = BodyMapSpot(
@@ -343,8 +385,8 @@ def record_body_map_spots_batch(x: BodyMapBatchIn, q: Session = Depends(db)):
     Returns:
         Count of created spots
     """
-    # Validate session exists
-    _validate_session(q, x.session_id)
+    # Soft validation - don't fail for client-generated session IDs
+    _validate_session_optional(q, x.session_id)
     
     # Create all spots
     created_spots = []
@@ -450,11 +492,13 @@ def record_post_video_response(x: PostVideoResponseIn, q: Session = Depends(db))
     Returns:
         Created PostVideoResponse record
     """
-    # Validate session exists
-    session = _validate_session(q, x.session_id)
+    # Soft validation - client-generated session IDs may not exist in Sessions table
+    session = _validate_session_optional(q, x.session_id)
     
-    # Get user_hash from session
-    user_hash = _get_user_hash_from_session(q, x.session_id)
+    # Get user_hash from session (may be None for client-generated sessions)
+    user_hash = None
+    if session:
+        user_hash = session.user_hash
     
     # Check if response already exists (update instead of create)
     existing = (
@@ -470,7 +514,8 @@ def record_post_video_response(x: PostVideoResponseIn, q: Session = Depends(db))
         existing.value_custom = x.value_custom
         existing.action_selected = x.action_selected
         existing.action_custom = x.action_custom
-        existing.user_hash = user_hash  # FIX: Set user_hash on update
+        if user_hash:
+            existing.user_hash = user_hash  # FIX: Set user_hash on update
         q.commit()
         q.refresh(existing)
         
@@ -481,7 +526,7 @@ def record_post_video_response(x: PostVideoResponseIn, q: Session = Depends(db))
         # Create new response
         response = PostVideoResponse(
             session_id=x.session_id,
-            user_hash=user_hash,  # FIX: Set user_hash on create
+            user_hash=user_hash,  # FIX: Set user_hash on create (may be None)
             insights_text=x.insights_text,
             value_selected=x.value_selected,
             value_custom=x.value_custom,
