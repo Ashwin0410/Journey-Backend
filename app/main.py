@@ -279,12 +279,37 @@ def run_migrations():
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         session_id TEXT NOT NULL,
                         video_time_seconds REAL NOT NULL,
+                        video_name TEXT,
                         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                     )
                 """))
                 conn.execute(text("CREATE INDEX IF NOT EXISTS ix_chills_timestamps_session_id ON chills_timestamps (session_id)"))
                 conn.commit()
                 print("[migration] Created chills_timestamps table")
+            
+            # -----------------------------------------------------------------
+            # Migration 5b: Add video_name column to chills_timestamps table
+            # NEW: Store which video the user was watching when they felt chills
+            # -----------------------------------------------------------------
+            result = conn.execute(text("PRAGMA table_info(chills_timestamps)"))
+            chills_cols = [row[1] for row in result.fetchall()]
+            
+            if 'video_name' not in chills_cols:
+                conn.execute(text("ALTER TABLE chills_timestamps ADD COLUMN video_name TEXT"))
+                conn.commit()
+                print("[migration] Added video_name column to chills_timestamps table")
+            
+            # Add user_hash column if missing (for better tracking)
+            if 'user_hash' not in chills_cols:
+                conn.execute(text("ALTER TABLE chills_timestamps ADD COLUMN user_hash TEXT"))
+                conn.commit()
+                print("[migration] Added user_hash column to chills_timestamps table")
+            
+            # Add intensity column if missing
+            if 'intensity' not in chills_cols:
+                conn.execute(text("ALTER TABLE chills_timestamps ADD COLUMN intensity INTEGER"))
+                conn.commit()
+                print("[migration] Added intensity column to chills_timestamps table")
             
             # -----------------------------------------------------------------
             # Migration 6: Create body_map_spots table
