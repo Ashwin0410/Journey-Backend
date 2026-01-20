@@ -406,6 +406,9 @@ def _generate_activities_via_llm(
         "- Self-care / wellness -> prefer spas, gyms, or parks\n\n"
         "Vary the place types across all 6 activities for diversity.\n"
         "Use BA flavours like Movement, Connection, Creative, Grounding, or Self-compassion.\n"
+        # FIX Issue #3: Add instruction to vary activities
+        "IMPORTANT: Generate UNIQUE and VARIED activities each time. "
+        "Avoid repetition - make each activity title and description distinct.\n"
         f"{chills_hint}"
         f"{weekly_plan_hint}"
     )
@@ -442,7 +445,7 @@ def _generate_activities_via_llm(
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": user_msg},
             ],
-            temperature=0.7,
+            temperature=0.85,  # FIX Issue #3: Increased from 0.7 for more variety
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"OpenAI error: {e}")
@@ -869,61 +872,71 @@ def _create_activity_completion_journal_entry(
     *,
     user_hash: str,
     activity: models.Activities,
-    completed_at: datetime,
+    activity_session: models.ActivitySessions,
 ) -> Optional[models.JournalEntries]:
     """
-    Create a journal entry to record activity completion in the timeline.
+    Create a journal entry when an activity is completed.
     
     FIX Issue #6: Activities completed must be updated in the timeline.
+    
+    This creates a journal entry with:
+    - entry_type: "activity"
+    - title: Activity title
+    - body: Activity completion message
+    - meta: Contains activity_id, location, duration, etc.
     
     Args:
         db: Database session
         user_hash: User hash
-        activity: The completed activity
-        completed_at: When the activity was completed
+        activity: The completed Activity
+        activity_session: The ActivitySession record
     
     Returns:
-        Created JournalEntries record or None if creation failed
+        Created JournalEntries record, or None if creation failed
     """
     try:
+        # Calculate duration if we have both started_at and completed_at
+        duration_minutes = None
+        if activity_session.started_at and activity_session.completed_at:
+            delta = activity_session.completed_at - activity_session.started_at
+            duration_minutes = int(delta.total_seconds() / 60)
+        
         # Build meta data for the journal entry
         meta = {
             "activity_id": activity.id,
             "activity_title": activity.title,
-            "activity_location": activity.location_label,
-            "activity_life_area": activity.life_area,
-            "activity_duration_min": activity.default_duration_min,
-            "completed_at": completed_at.isoformat(),
+            "location_label": activity.location_label,
+            "life_area": activity.life_area,
+            "duration_minutes": duration_minutes,
+            "completed_at": activity_session.completed_at.isoformat() if activity_session.completed_at else None,
+            "lat": activity.lat,
+            "lng": activity.lng,
         }
-        
-        # Include coordinates if available
-        if activity.lat is not None and activity.lng is not None:
-            meta["lat"] = activity.lat
-            meta["lng"] = activity.lng
-        
-        if activity.place_id:
-            meta["place_id"] = activity.place_id
         
         # Create the journal entry
         entry = models.JournalEntries(
             user_hash=user_hash,
-            entry_type="activity",  # Special type for activity completions
+            entry_type="activity",
             title=f"Completed: {activity.title}",
-            body=f"Completed activity at {activity.location_label or 'location'}.",
+            body=f"You completed '{activity.title}' at {activity.location_label or 'your chosen location'}. Great job taking this step!",
             meta_json=json.dumps(meta),
-            date=completed_at.date(),
+            date=date.today(),
+            session_id=None,  # No audio session for activity completions
         )
         db.add(entry)
         db.commit()
         db.refresh(entry)
         
-        print(f"[activity] Created journal entry id={entry.id} for activity completion: '{activity.title}'")
+        print(f"[activity] Created journal entry for activity completion: activity_id={activity.id}, entry_id={entry.id}")
         
         return entry
+    
     except Exception as e:
-        print(f"[activity] ERROR creating activity completion journal entry: {e}")
+        print(f"[activity] Error creating journal entry for activity completion: {e}")
         db.rollback()
         return None
+
+
 
 
 @r.get(
@@ -1461,7 +1474,6 @@ def start_activity(
 # FIX Issue #3b & #5: Enhanced /complete endpoint
 # - Properly marks activity as completed
 # - Returns next_activity for frontend to display after completion
-# FIX Issue #6: Auto-create journal entry on activity completion
 # =============================================================================
 
 @r.post("/complete", summary="Complete Activity")
@@ -1514,10 +1526,8 @@ def complete_activity(
     if not session_row:
         raise HTTPException(status_code=404, detail="Started activity not found")
 
-    # Mark as completed
-    completed_at = datetime.utcnow()
     session_row.status = "completed"
-    session_row.completed_at = completed_at
+    session_row.completed_at = datetime.utcnow()
     db.commit()
     db.refresh(session_row)
 
@@ -1536,7 +1546,7 @@ def complete_activity(
             db,
             user_hash=payload.user_hash,
             activity=completed_activity,
-            completed_at=completed_at,
+            activity_session=session_row,
         )
 
     # =============================================================================
@@ -1585,7 +1595,9 @@ def complete_activity(
         "ok": True,
         "completed_activity_id": activity_id,
         "next_activity": next_activity_out.model_dump() if next_activity_out else None,
-        "journal_entry_id": journal_entry.id if journal_entry else None,  # FIX Issue #6
+        # FIX Issue #6: Return journal entry info
+        "journal_entry_created": journal_entry is not None,
+        "journal_entry_id": journal_entry.id if journal_entry else None,
     }
 
 
