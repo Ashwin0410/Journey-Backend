@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 import uuid
-from datetime import datetime
+from datetime import datetime, date
 from typing import List, Optional, Tuple, Dict
 
 import requests
@@ -860,6 +860,70 @@ def _get_therapist_suggested_activities_for_patient(
         return []
 
 
+# =============================================================================
+# FIX Issue #6: Helper function to create journal entry for activity completion
+# =============================================================================
+
+def _create_activity_completion_journal_entry(
+    db: Session,
+    *,
+    user_hash: str,
+    activity: models.Activities,
+    completed_at: datetime,
+) -> Optional[models.JournalEntries]:
+    """
+    Create a journal entry to record activity completion in the timeline.
+    
+    FIX Issue #6: Activities completed must be updated in the timeline.
+    
+    Args:
+        db: Database session
+        user_hash: User hash
+        activity: The completed activity
+        completed_at: When the activity was completed
+    
+    Returns:
+        Created JournalEntries record or None if creation failed
+    """
+    try:
+        # Build meta data for the journal entry
+        meta = {
+            "activity_id": activity.id,
+            "activity_title": activity.title,
+            "activity_location": activity.location_label,
+            "activity_life_area": activity.life_area,
+            "activity_duration_min": activity.default_duration_min,
+            "completed_at": completed_at.isoformat(),
+        }
+        
+        # Include coordinates if available
+        if activity.lat is not None and activity.lng is not None:
+            meta["lat"] = activity.lat
+            meta["lng"] = activity.lng
+        
+        if activity.place_id:
+            meta["place_id"] = activity.place_id
+        
+        # Create the journal entry
+        entry = models.JournalEntries(
+            user_hash=user_hash,
+            entry_type="activity",  # Special type for activity completions
+            title=f"Completed: {activity.title}",
+            body=f"Completed activity at {activity.location_label or 'location'}.",
+            meta_json=json.dumps(meta),
+            date=completed_at.date(),
+        )
+        db.add(entry)
+        db.commit()
+        db.refresh(entry)
+        
+        print(f"[activity] Created journal entry id={entry.id} for activity completion: '{activity.title}'")
+        
+        return entry
+    except Exception as e:
+        print(f"[activity] ERROR creating activity completion journal entry: {e}")
+        db.rollback()
+        return None
 
 
 @r.get(
@@ -1397,6 +1461,7 @@ def start_activity(
 # FIX Issue #3b & #5: Enhanced /complete endpoint
 # - Properly marks activity as completed
 # - Returns next_activity for frontend to display after completion
+# FIX Issue #6: Auto-create journal entry on activity completion
 # =============================================================================
 
 @r.post("/complete", summary="Complete Activity")
@@ -1449,10 +1514,30 @@ def complete_activity(
     if not session_row:
         raise HTTPException(status_code=404, detail="Started activity not found")
 
+    # Mark as completed
+    completed_at = datetime.utcnow()
     session_row.status = "completed"
-    session_row.completed_at = datetime.utcnow()
+    session_row.completed_at = completed_at
     db.commit()
     db.refresh(session_row)
+
+    # =============================================================================
+    # FIX Issue #6: Create journal entry for activity completion
+    # =============================================================================
+    completed_activity = (
+        db.query(models.Activities)
+        .filter(models.Activities.id == activity_id)
+        .first()
+    )
+    
+    journal_entry = None
+    if completed_activity:
+        journal_entry = _create_activity_completion_journal_entry(
+            db,
+            user_hash=payload.user_hash,
+            activity=completed_activity,
+            completed_at=completed_at,
+        )
 
     # =============================================================================
     # FIX Issue #5: Generate and return next activity after completion
@@ -1500,6 +1585,7 @@ def complete_activity(
         "ok": True,
         "completed_activity_id": activity_id,
         "next_activity": next_activity_out.model_dump() if next_activity_out else None,
+        "journal_entry_id": journal_entry.id if journal_entry else None,  # FIX Issue #6
     }
 
 
