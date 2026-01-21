@@ -13,10 +13,12 @@ These endpoints support the new video-based therapeutic experience
 that replaces the audio generation system.
 
 FIX Issue #2: Added VideoSession auto-creation to fix foreign key constraint
+V11 FIX Issue #2: Enhanced VideoSession handling with chills_count update and better error handling
 """
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from datetime import datetime
 from typing import Optional, List
 from pydantic import BaseModel, Field
@@ -191,6 +193,7 @@ def _ensure_video_session(
 ) -> bool:
     """
     FIX Issue #2: Ensure a VideoSession exists for the given session_id.
+    V11 FIX: Enhanced with better error handling and retry logic.
     
     Creates one if it doesn't exist. This is needed because ChillsTimestamp
     has a foreign key to video_sessions.session_id.
@@ -204,68 +207,197 @@ def _ensure_video_session(
     Returns:
         True if VideoSession exists or was created, False if creation failed
     """
-    # Check if VideoSession already exists
-    existing = (
-        db_session.query(VideoSession)
-        .filter(VideoSession.session_id == session_id)
-        .first()
-    )
+    if not session_id:
+        print("[chills] ERROR: session_id is required for _ensure_video_session")
+        return False
     
-    if existing:
-        print(f"[chills] VideoSession already exists for {session_id}")
-        return True
+    # Check if VideoSession already exists
+    try:
+        existing = (
+            db_session.query(VideoSession)
+            .filter(VideoSession.session_id == session_id)
+            .first()
+        )
+        
+        if existing:
+            print(f"[chills] VideoSession already exists for {session_id}")
+            # V11 FIX: Update user_hash if it was missing before
+            if user_hash and (not existing.user_hash or existing.user_hash == "unknown"):
+                existing.user_hash = user_hash
+                db_session.commit()
+                print(f"[chills] Updated user_hash on existing VideoSession")
+            return True
+    except Exception as e:
+        print(f"[chills] Error checking existing VideoSession: {e}")
+        # Continue to try creating
     
     # Try to find video_id by matching video_name to stimulus_name
     video_id = None
     if video_name:
-        video = (
-            db_session.query(VideoStimulus)
-            .filter(VideoStimulus.stimulus_name == video_name)
-            .first()
-        )
-        if video:
-            video_id = video.id
-            print(f"[chills] Found video_id={video_id} for '{video_name}'")
-        else:
-            # Try partial match
+        try:
             video = (
                 db_session.query(VideoStimulus)
-                .filter(VideoStimulus.stimulus_name.ilike(f"%{video_name}%"))
+                .filter(VideoStimulus.stimulus_name == video_name)
                 .first()
             )
             if video:
                 video_id = video.id
-                print(f"[chills] Found video_id={video_id} via partial match for '{video_name}'")
+                print(f"[chills] Found video_id={video_id} for '{video_name}'")
+            else:
+                # Try partial match
+                video = (
+                    db_session.query(VideoStimulus)
+                    .filter(VideoStimulus.stimulus_name.ilike(f"%{video_name}%"))
+                    .first()
+                )
+                if video:
+                    video_id = video.id
+                    print(f"[chills] Found video_id={video_id} via partial match for '{video_name}'")
+        except Exception as e:
+            print(f"[chills] Error looking up video by name: {e}")
     
     # If no video_id found, try to get any video as fallback
     if video_id is None:
-        fallback_video = db_session.query(VideoStimulus).first()
-        if fallback_video:
-            video_id = fallback_video.id
-            print(f"[chills] Using fallback video_id={video_id}")
+        try:
+            fallback_video = db_session.query(VideoStimulus).first()
+            if fallback_video:
+                video_id = fallback_video.id
+                print(f"[chills] Using fallback video_id={video_id}")
+        except Exception as e:
+            print(f"[chills] Error getting fallback video: {e}")
     
     # If still no video_id, we can't create VideoSession (FK constraint)
     if video_id is None:
         print(f"[chills] No video found, cannot create VideoSession for {session_id}")
         return False
     
+    # V11 FIX: Use a cleaner user_hash fallback
+    effective_user_hash = user_hash or "unknown"
+    
     # Create VideoSession
     try:
         new_session = VideoSession(
             session_id=session_id,
-            user_hash=user_hash or "unknown",
+            user_hash=effective_user_hash,
             video_id=video_id,
             started_at=datetime.utcnow(),
             completed=False,
+            chills_count=0,  # V11 FIX: Initialize chills_count
         )
         db_session.add(new_session)
         db_session.commit()
-        print(f"[chills] Created VideoSession for {session_id}, video_id={video_id}")
+        print(f"[chills] Created VideoSession for {session_id}, video_id={video_id}, user={effective_user_hash}")
         return True
+    except IntegrityError as e:
+        # V11 FIX: Handle race condition - session was created by another request
+        db_session.rollback()
+        print(f"[chills] IntegrityError creating VideoSession (likely race condition): {e}")
+        # Check if it exists now
+        existing = (
+            db_session.query(VideoSession)
+            .filter(VideoSession.session_id == session_id)
+            .first()
+        )
+        if existing:
+            print(f"[chills] VideoSession exists after race condition, returning True")
+            return True
+        return False
     except Exception as e:
         print(f"[chills] Failed to create VideoSession: {e}")
         db_session.rollback()
         return False
+
+
+def _update_video_session_chills_count(db_session: Session, session_id: str) -> None:
+    """
+    V11 FIX Issue #2: Update the chills_count on VideoSession after recording a timestamp.
+    
+    This keeps the denormalized count in sync for faster queries.
+    
+    Args:
+        db_session: Database session
+        session_id: Session ID
+    """
+    try:
+        video_session = (
+            db_session.query(VideoSession)
+            .filter(VideoSession.session_id == session_id)
+            .first()
+        )
+        
+        if video_session:
+            # Count actual timestamps
+            count = (
+                db_session.query(ChillsTimestamp)
+                .filter(ChillsTimestamp.session_id == session_id)
+                .count()
+            )
+            video_session.chills_count = count
+            db_session.commit()
+            print(f"[chills] Updated VideoSession chills_count to {count}")
+    except Exception as e:
+        print(f"[chills] Error updating VideoSession chills_count: {e}")
+        # Don't rollback - this is a non-critical update
+
+
+def _update_video_session_body_map_count(db_session: Session, session_id: str) -> None:
+    """
+    V11 FIX Issue #2: Update the body_map_spots count on VideoSession.
+    
+    This keeps the denormalized count in sync for faster queries.
+    
+    Args:
+        db_session: Database session
+        session_id: Session ID
+    """
+    try:
+        video_session = (
+            db_session.query(VideoSession)
+            .filter(VideoSession.session_id == session_id)
+            .first()
+        )
+        
+        if video_session:
+            # Count actual body map spots
+            count = (
+                db_session.query(BodyMapSpot)
+                .filter(BodyMapSpot.session_id == session_id)
+                .count()
+            )
+            video_session.body_map_spots = count
+            db_session.commit()
+            print(f"[chills] Updated VideoSession body_map_spots to {count}")
+    except Exception as e:
+        print(f"[chills] Error updating VideoSession body_map_spots: {e}")
+        # Don't rollback - this is a non-critical update
+
+
+def _mark_video_session_completed(db_session: Session, session_id: str) -> None:
+    """
+    V11 FIX Issue #2: Mark VideoSession as completed and having a response.
+    
+    Called after post-video response is recorded.
+    
+    Args:
+        db_session: Database session
+        session_id: Session ID
+    """
+    try:
+        video_session = (
+            db_session.query(VideoSession)
+            .filter(VideoSession.session_id == session_id)
+            .first()
+        )
+        
+        if video_session:
+            video_session.completed = True
+            video_session.has_response = True
+            video_session.completed_at = datetime.utcnow()
+            db_session.commit()
+            print(f"[chills] Marked VideoSession {session_id} as completed")
+    except Exception as e:
+        print(f"[chills] Error marking VideoSession as completed: {e}")
+        # Don't rollback - this is a non-critical update
 
 
 def _validate_session_optional(db_session: Session, session_id: str) -> Optional[Sessions]:
@@ -369,6 +501,7 @@ def record_chills_timestamp(x: ChillsTimestampIn, q: Session = Depends(db)):
     Multiple timestamps can be recorded per session.
     
     FIX Issue #2: Now auto-creates VideoSession if it doesn't exist.
+    V11 FIX Issue #2: Enhanced with better error handling and chills_count update.
     
     Args:
         x: ChillsTimestampIn with session_id, video_time_seconds, video_name, user_hash
@@ -378,6 +511,14 @@ def record_chills_timestamp(x: ChillsTimestampIn, q: Session = Depends(db)):
         Created ChillsTimestamp record
     """
     print(f"[chills] Recording timestamp: session={x.session_id}, time={x.video_time_seconds}, video={x.video_name}, user={x.user_hash}")
+    
+    # V11 FIX: Validate required fields
+    if not x.session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    
+    if x.video_time_seconds < 0:
+        print(f"[chills] Warning: negative video_time_seconds={x.video_time_seconds}, setting to 0")
+        x.video_time_seconds = 0
     
     # FIX Issue #2: Ensure VideoSession exists before inserting ChillsTimestamp
     # This fixes the foreign key constraint error
@@ -389,7 +530,12 @@ def record_chills_timestamp(x: ChillsTimestampIn, q: Session = Depends(db)):
     )
     
     if not session_created:
-        print(f"[chills] Warning: Could not ensure VideoSession exists, attempting insert anyway")
+        # V11 FIX: More informative error message
+        print(f"[chills] ERROR: Could not ensure VideoSession exists for {x.session_id}")
+        raise HTTPException(
+            status_code=500, 
+            detail="Could not create video session. Please ensure a video exists in the database."
+        )
     
     # Create timestamp record
     try:
@@ -406,12 +552,23 @@ def record_chills_timestamp(x: ChillsTimestampIn, q: Session = Depends(db)):
         
         print(f"[chills] Recorded timestamp id={timestamp.id} for session {x.session_id} at {x.video_time_seconds}s")
         
+        # V11 FIX: Update VideoSession chills_count
+        _update_video_session_chills_count(q, x.session_id)
+        
         return ChillsTimestampOut(
             id=timestamp.id,
             session_id=timestamp.session_id,
             video_time_seconds=timestamp.video_time_seconds,
             video_name=getattr(timestamp, 'video_name', None),
             created_at=timestamp.created_at,
+        )
+    except IntegrityError as e:
+        print(f"[chills] IntegrityError recording timestamp: {e}")
+        q.rollback()
+        # V11 FIX: Try to give more helpful error
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Database integrity error recording chills. The video session may not exist."
         )
     except Exception as e:
         print(f"[chills] ERROR recording timestamp: {e}")
@@ -507,6 +664,8 @@ def record_body_map_spots_batch(x: BodyMapBatchIn, q: Session = Depends(db)):
     More efficient than calling /bodymap multiple times.
     Used when user has tapped multiple locations.
     
+    V11 FIX Issue #2: Enhanced with better error handling and body_map_spots count update.
+    
     Args:
         x: BodyMapBatchIn with session_id and list of spots
         q: Database session
@@ -514,17 +673,41 @@ def record_body_map_spots_batch(x: BodyMapBatchIn, q: Session = Depends(db)):
     Returns:
         Count of created spots
     """
+    # V11 FIX: Validate required fields
+    if not x.session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    
+    if not x.spots or len(x.spots) == 0:
+        return {
+            "ok": True,
+            "count": 0,
+            "session_id": x.session_id,
+            "message": "No spots to record",
+        }
+    
     # FIX Issue #2: Ensure VideoSession exists
-    _ensure_video_session(q, x.session_id, x.user_hash)
+    session_created = _ensure_video_session(q, x.session_id, x.user_hash)
+    
+    if not session_created:
+        print(f"[chills] Warning: Could not ensure VideoSession exists for body map")
+        # Continue anyway - body map spots might still work
     
     # Create all spots
     try:
         created_spots = []
         for spot_data in x.spots:
+            # V11 FIX: Validate spot data
+            x_pct = spot_data.get("x_percent", spot_data.get("x", 0))
+            y_pct = spot_data.get("y_percent", spot_data.get("y", 0))
+            
+            # Clamp to valid range
+            x_pct = max(0, min(100, float(x_pct)))
+            y_pct = max(0, min(100, float(y_pct)))
+            
             spot = BodyMapSpot(
                 session_id=x.session_id,
-                x_percent=spot_data.get("x_percent", 0),
-                y_percent=spot_data.get("y_percent", 0),
+                x_percent=x_pct,
+                y_percent=y_pct,
                 created_at=datetime.utcnow(),
             )
             q.add(spot)
@@ -533,6 +716,9 @@ def record_body_map_spots_batch(x: BodyMapBatchIn, q: Session = Depends(db)):
         q.commit()
         
         print(f"[chills] Recorded {len(created_spots)} body map spots for session {x.session_id}")
+        
+        # V11 FIX: Update VideoSession body_map_spots count
+        _update_video_session_body_map_count(q, x.session_id)
         
         return {
             "ok": True,
@@ -619,6 +805,8 @@ def record_post_video_response(x: PostVideoResponseIn, q: Session = Depends(db))
     - value_selected helps personalize future recommendations
     - insights_text is stored for journaling/reflection
     
+    V11 FIX Issue #2: Now ensures VideoSession exists and marks it as completed.
+    
     Args:
         x: PostVideoResponseIn with all response fields
         q: Database session
@@ -626,12 +814,19 @@ def record_post_video_response(x: PostVideoResponseIn, q: Session = Depends(db))
     Returns:
         Created PostVideoResponse record
     """
+    # V11 FIX: Validate required fields
+    if not x.session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    
     # Get user_hash from request or try to find from old Sessions table
     user_hash = x.user_hash
     if not user_hash:
         session = _validate_session_optional(q, x.session_id)
         if session:
             user_hash = session.user_hash
+    
+    # V11 FIX Issue #2: Ensure VideoSession exists
+    _ensure_video_session(q, x.session_id, user_hash)
     
     # Check if response already exists (update instead of create)
     existing = (
@@ -672,6 +867,9 @@ def record_post_video_response(x: PostVideoResponseIn, q: Session = Depends(db))
         q.refresh(response)
         
         print(f"[chills] Created post-video response for session {x.session_id}")
+    
+    # V11 FIX Issue #2: Mark VideoSession as having a response and completed
+    _mark_video_session_completed(q, x.session_id)
     
     # Log the action for activity generation
     action_for_activities = _get_action_for_activity_generation(response)
