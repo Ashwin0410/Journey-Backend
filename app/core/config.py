@@ -41,6 +41,8 @@ class Cfg(BaseSettings):
         "http://127.0.0.1:5500",      
         "http://localhost:5500",      
         "http://localhost:8000",
+        "https://journey-frontend-asu0.onrender.com",
+        "https://journey-backend-yzhw.onrender.com",
     ]
     
     VOICE_INCEPTION_PRIMARY: Optional[str] = "qNkzaJoHLLdpvgh5tISm"
