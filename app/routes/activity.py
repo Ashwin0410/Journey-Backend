@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import json
 import math
-import random
 import uuid
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 from typing import List, Optional, Tuple, Dict
 
 import requests
@@ -168,106 +167,6 @@ def _find_place_by_name(name: str, all_places: List[PlaceDetail]) -> Optional[Pl
 # CHANGE 5: ALL ACTIVITIES ARE NOW PLACE-BASED
 # =============================================================================
 
-# =============================================================================
-# V11 FIX Issue #3: Helper function to get recent activity titles for a user
-# Used to prevent repetition by informing the LLM what activities to avoid
-# =============================================================================
-def _get_recent_activity_titles(db: Session, user_hash: Optional[str], days: int = 7, limit: int = 20) -> List[str]:
-    """
-    Get titles of recently generated activities for a user.
-    
-    Used to inform the LLM what activities to avoid generating again,
-    reducing repetition.
-    
-    Args:
-        db: Database session
-        user_hash: User's hash identifier
-        days: Number of days to look back (default 7)
-        limit: Maximum number of titles to return (default 20)
-    
-    Returns:
-        List of activity titles from recent days
-    """
-    if not user_hash:
-        return []
-    
-    try:
-        cutoff_date = datetime.utcnow() - timedelta(days=days)
-        
-        recent_activities = (
-            db.query(models.Activities.title)
-            .filter(
-                models.Activities.user_hash == user_hash,
-                models.Activities.created_at >= cutoff_date,
-            )
-            .order_by(models.Activities.created_at.desc())
-            .limit(limit)
-            .all()
-        )
-        
-        titles = [a.title for a in recent_activities if a.title]
-        print(f"[activity] Found {len(titles)} recent activity titles for user to avoid repetition")
-        return titles
-    except Exception as e:
-        print(f"[activity] Error getting recent activity titles: {e}")
-        return []
-
-
-# =============================================================================
-# V11 FIX Issue #3: Random variation elements to prevent repetition
-# =============================================================================
-ACTIVITY_THEMES = [
-    "discovery and exploration",
-    "mindful presence",
-    "gentle movement",
-    "human connection",
-    "creative expression",
-    "nature and outdoors",
-    "self-nurturing",
-    "playfulness and joy",
-    "quiet reflection",
-    "sensory awareness",
-]
-
-TIME_OF_DAY_FOCUS = [
-    "morning energy and fresh starts",
-    "midday break and recharge",
-    "afternoon wind-down",
-    "evening relaxation",
-    "anytime flexibility",
-]
-
-ACTIVITY_STYLES = [
-    "solo and introspective",
-    "potentially social",
-    "active and energizing",
-    "calm and grounding",
-    "curious and learning-focused",
-]
-
-
-def _get_random_variation_prompt() -> str:
-    """
-    Generate a random variation prompt to encourage diverse activity generation.
-    
-    Returns:
-        A string with random theme, time focus, and style suggestions
-    """
-    theme = random.choice(ACTIVITY_THEMES)
-    time_focus = random.choice(TIME_OF_DAY_FOCUS)
-    style = random.choice(ACTIVITY_STYLES)
-    
-    # Add a random seed number for extra variation
-    seed = random.randint(1000, 9999)
-    
-    return (
-        f"\n\nVARIATION SEED #{seed}:\n"
-        f"- Theme emphasis: {theme}\n"
-        f"- Time of day focus: {time_focus}\n"
-        f"- Activity style: {style}\n"
-        "Use these as inspiration to create FRESH, UNIQUE activities.\n"
-    )
-
 
 def _generate_activities_via_llm(
     *,
@@ -289,8 +188,6 @@ def _generate_activities_via_llm(
     # CHANGE 2: Direct GPS coordinates for location refresh
     gps_lat: Optional[float] = None,
     gps_lng: Optional[float] = None,
-    # V11 FIX Issue #3: Recent activities to avoid
-    recent_activity_titles: Optional[List[str]] = None,
 ) -> List[schemas.ActivityBase]:
 
     context_bits: List[str] = []
@@ -491,24 +388,6 @@ def _generate_activities_via_llm(
             "Each activity MUST specify a type of place to visit.\n\n"
         )
     
-    # =============================================================================
-    # V11 FIX Issue #3: Build anti-repetition hint from recent activity titles
-    # =============================================================================
-    avoid_hint = ""
-    if recent_activity_titles and len(recent_activity_titles) > 0:
-        # Limit to 15 titles to keep prompt size reasonable
-        titles_to_avoid = recent_activity_titles[:15]
-        avoid_hint = (
-            "\n\nCRITICAL - AVOID REPETITION:\n"
-            "The user has recently done these activities. DO NOT suggest similar ones:\n"
-            f"- {chr(10).join('- ' + t for t in titles_to_avoid)}\n"
-            "Create COMPLETELY DIFFERENT activities with new titles and fresh ideas.\n"
-            "Vary the verbs, locations, and activity types from what's listed above.\n"
-        )
-    
-    # V11 FIX Issue #3: Add random variation prompt for diversity
-    variation_prompt = _get_random_variation_prompt()
-    
     system_msg = (
         "You are a behavioural activation coach designing very small, realistic, "
         "real-world activities for a mental health app.\n"
@@ -527,32 +406,26 @@ def _generate_activities_via_llm(
         "- Self-care / wellness -> prefer spas, gyms, or parks\n\n"
         "Vary the place types across all 6 activities for diversity.\n"
         "Use BA flavours like Movement, Connection, Creative, Grounding, or Self-compassion.\n"
-        # V11 FIX Issue #3: Stronger anti-repetition instructions
-        "CRITICAL: Generate COMPLETELY UNIQUE and VARIED activities each time.\n"
-        "NEVER repeat activity titles or descriptions you've generated before.\n"
-        "Use creative, specific titles - avoid generic phrases like 'Take a walk' or 'Visit a cafe'.\n"
-        "Each activity title should be memorable and distinct.\n"
-        f"{avoid_hint}"
-        f"{variation_prompt}"
+        # FIX Issue #3: Add instruction to vary activities
+        "IMPORTANT: Generate UNIQUE and VARIED activities each time. "
+        "Avoid repetition - make each activity title and description distinct.\n"
         f"{chills_hint}"
         f"{weekly_plan_hint}"
     )
 
     # =============================================================================
     # CHANGE 5: Updated user message - ALL 6 activities are PLACE-BASED
-    # V11 FIX Issue #3: Added emphasis on uniqueness
     # =============================================================================
     user_msg = (
         f"User context: {context_text}\n\n"
         "Generate EXACTLY 6 PLACE-BASED activities.\n"
         "EVERY activity MUST be at a real place (park, cafe, library, gym, etc.) - NOT at home.\n"
-        "Use different place types across the 6 activities for variety.\n"
-        "Make each activity title UNIQUE and CREATIVE - no generic titles!\n\n"
+        "Use different place types across the 6 activities for variety.\n\n"
         "Return ONLY JSON in this exact format (no extra commentary):\n"
         "{\n"
         '  \"activities\": [\n'
         "    {\n"
-        '      \"title\": \"UNIQUE creative short name - be specific and memorable\",\n'
+        '      \"title\": \"short name\",\n'
         '      \"description\": \"2–3 sentence description of what to do at this specific place\",\n'
         '      \"life_area\": \"Movement | Connection | Creative | Grounding | Self-compassion | Work | Body\",\n'
         '      \"effort_level\": \"low | medium | high\",\n'
@@ -565,9 +438,6 @@ def _generate_activities_via_llm(
         "}"
     )
 
-    # =============================================================================
-    # V11 FIX Issue #3: Increased temperature and added frequency_penalty
-    # =============================================================================
     try:
         resp = client.chat.completions.create(
             model=OPENAI_ACTIVITY_MODEL,
@@ -575,9 +445,7 @@ def _generate_activities_via_llm(
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": user_msg},
             ],
-            temperature=0.95,  # V11 FIX Issue #3: Increased from 0.85 for more variety
-            frequency_penalty=0.5,  # V11 FIX Issue #3: Penalize repeated tokens
-            presence_penalty=0.3,  # V11 FIX Issue #3: Encourage new topics
+            temperature=0.85,  # FIX Issue #3: Increased from 0.7 for more variety
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"OpenAI error: {e}")
@@ -1123,9 +991,6 @@ def get_today_activity(
     # Get context from user history
     fb = _fallback_context_from_history(db, user_hash)
     
-    # V11 FIX Issue #3: Get recent activity titles to avoid repetition
-    recent_titles = _get_recent_activity_titles(db, user_hash)
-    
     print(f"[activity] /today generating new activity with gps_lat={gps_lat}, gps_lng={gps_lng}")
     
     generated = _generate_activities_via_llm(
@@ -1144,7 +1009,6 @@ def get_today_activity(
         week_actions=fb.get("week_actions", []),
         gps_lat=gps_lat,
         gps_lng=gps_lng,
-        recent_activity_titles=recent_titles,  # V11 FIX Issue #3
     )
     
     if not generated:
@@ -1308,9 +1172,6 @@ def get_recommendation(
     intake_life_focus = fb.get("life_focus")
     week_actions = fb.get("week_actions", [])
 
-    # V11 FIX Issue #3: Get recent activity titles to avoid repetition
-    recent_titles = _get_recent_activity_titles(db, user_hash)
-
     print(f"[activity] /recommendation called with postal_code='{postal_code}', user_hash='{user_hash}', life_area='{intake_life_area}', life_focus='{intake_life_focus}', gps_lat={gps_lat}, gps_lng={gps_lng}")
 
     generated = _generate_activities_via_llm(
@@ -1332,7 +1193,6 @@ def get_recommendation(
         # CHANGE 2: Pass GPS coordinates for location refresh
         gps_lat=gps_lat,
         gps_lng=gps_lng,
-        recent_activity_titles=recent_titles,  # V11 FIX Issue #3
     )
 
     # BUG FIX (Change 7): Pass user_hash when storing activities
@@ -1697,9 +1557,6 @@ def complete_activity(
         # Get context from user history for generating next activity
         fb = _fallback_context_from_history(db, payload.user_hash)
         
-        # V11 FIX Issue #3: Get recent activity titles to avoid repetition
-        recent_titles = _get_recent_activity_titles(db, payload.user_hash)
-        
         # Generate a new activity
         generated = _generate_activities_via_llm(
             mood=fb.get("mood"),
@@ -1715,7 +1572,6 @@ def complete_activity(
             life_area=fb.get("life_area"),
             life_focus=fb.get("life_focus"),
             week_actions=fb.get("week_actions", []),
-            recent_activity_titles=recent_titles,  # V11 FIX Issue #3
         )
         
         if generated:
@@ -1943,9 +1799,6 @@ def _generate_activities_from_action(
     # Get additional context from user history
     fb = _fallback_context_from_history(db, user_hash)
     
-    # V11 FIX Issue #3: Get recent activity titles to avoid repetition
-    recent_titles = _get_recent_activity_titles(db, user_hash)
-    
     # Use the action_today as the primary goal
     return _generate_activities_via_llm(
         mood=fb.get("mood"),
@@ -1963,7 +1816,6 @@ def _generate_activities_from_action(
         week_actions=fb.get("week_actions", []),
         gps_lat=gps_lat,
         gps_lng=gps_lng,
-        recent_activity_titles=recent_titles,  # V11 FIX Issue #3
     )
 
 
