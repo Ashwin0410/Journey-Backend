@@ -387,6 +387,93 @@ def run_migrations():
                 conn.commit()
                 print("[migration] Created ml_questionnaires table")
             
+            # -----------------------------------------------------------------
+            # Migration 9: Seed video_stimuli table from Stimuli.csv
+            # This ensures VideoSession can be created with valid video_id
+            # -----------------------------------------------------------------
+            try:
+                # First ensure the table exists
+                result = conn.execute(text(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='video_stimuli'"
+                ))
+                if not result.fetchone():
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS video_stimuli (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            stimulus_name TEXT NOT NULL,
+                            stimulus_description TEXT,
+                            stimulus_url TEXT NOT NULL,
+                            embed_url TEXT,
+                            thumbnail_url TEXT,
+                            duration_seconds INTEGER,
+                            category TEXT,
+                            tags_json TEXT,
+                            awe_potential REAL,
+                            emotional_valence REAL,
+                            arousal_level REAL,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """))
+                    conn.commit()
+                    print("[migration] Created video_stimuli table")
+                
+                # Check how many stimuli exist
+                result = conn.execute(text("SELECT COUNT(*) FROM video_stimuli"))
+                existing_count = result.fetchone()[0]
+                
+                if existing_count == 0:
+                    # Load from CSV and seed
+                    import os
+                    import csv
+                    csv_path = os.path.join(os.path.dirname(__file__), "data", "Stimuli.csv")
+                    
+                    if os.path.exists(csv_path):
+                        with open(csv_path, 'r', encoding='utf-8') as f:
+                            reader = csv.DictReader(f)
+                            inserted = 0
+                            for row in reader:
+                                name = row.get('Stimulus name', '').strip()
+                                desc = row.get('Description ', row.get('Description', '')).strip()
+                                url = row.get('URL', '').strip()
+                                
+                                if name and url:
+                                    # Extract video ID for embed/thumbnail URLs
+                                    import re
+                                    video_id = None
+                                    match = re.search(r'youtu\.be/([a-zA-Z0-9_-]{11})', url)
+                                    if match:
+                                        video_id = match.group(1)
+                                    else:
+                                        match = re.search(r'youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})', url)
+                                        if match:
+                                            video_id = match.group(1)
+                                    
+                                    embed_url = f"https://www.youtube.com/embed/{video_id}" if video_id else None
+                                    thumbnail_url = f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg" if video_id else None
+                                    
+                                    # Escape single quotes in text
+                                    name_safe = name.replace("'", "''")
+                                    desc_safe = desc.replace("'", "''")
+                                    url_safe = url.replace("'", "''")
+                                    embed_safe = embed_url.replace("'", "''") if embed_url else None
+                                    thumb_safe = thumbnail_url.replace("'", "''") if thumbnail_url else None
+                                    
+                                    conn.execute(text(f"""
+                                        INSERT INTO video_stimuli (stimulus_name, stimulus_description, stimulus_url, embed_url, thumbnail_url)
+                                        VALUES ('{name_safe}', '{desc_safe}', '{url_safe}', '{embed_safe}', '{thumb_safe}')
+                                    """))
+                                    inserted += 1
+                            
+                            conn.commit()
+                            print(f"[migration] Seeded {inserted} stimuli into video_stimuli table")
+                    else:
+                        print(f"[migration] Stimuli.csv not found at {csv_path}")
+                else:
+                    print(f"[migration] video_stimuli already has {existing_count} records, skipping seed")
+                    
+            except Exception as seed_err:
+                print(f"[migration] Error seeding video_stimuli (non-fatal): {seed_err}")
+            
             print("[migration] All migrations completed successfully")
             
     except Exception as e:
