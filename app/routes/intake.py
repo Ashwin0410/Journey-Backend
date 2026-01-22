@@ -186,6 +186,7 @@ class DemographicsIn(BaseModel):
     Simplified demographics input for the new intake flow.
     Only collects essential information - no life_area, life_focus, schema items, etc.
     """
+    name: Optional[str] = Field(None, description="User's name")
     age: int = Field(ge=13, le=120, description="User's age in years")
     gender: str = Field(description="User's gender")
     postal_code: Optional[str] = Field(None, description="Postal/ZIP code")
@@ -370,6 +371,13 @@ def submit_demographics(
         db.commit()
         db.refresh(intake)
         print(f"[intake] Created new intake id={intake.id}")
+    
+    # Save name to Users table if provided
+    if payload.name:
+        user = db.merge(current_user)
+        user.name = payload.name
+        db.commit()
+        print(f"[intake] Updated user name to: {payload.name}")
     
     return DemographicsOut(
         success=True,
