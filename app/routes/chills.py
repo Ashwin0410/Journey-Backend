@@ -13,13 +13,15 @@ These endpoints support the new video-based therapeutic experience
 that replaces the audio generation system.
 
 FIX Issue #2: Added VideoSession auto-creation to fix foreign key constraint
+FIX Issue #10: Post-video responses now create journal entries for timeline
 """
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from datetime import datetime
+from datetime import datetime, date as date_type
 from typing import Optional, List
 from pydantic import BaseModel, Field
+import json
 
 from ..db import SessionLocal
 from ..models import (
@@ -30,6 +32,7 @@ from ..models import (
     PostVideoResponse,
     VideoSession,
     VideoStimulus,
+    JournalEntries,
 )
 
 # ============================================================================
@@ -356,6 +359,102 @@ def _get_action_for_activity_generation(response: PostVideoResponse) -> Optional
     return None
 
 
+def _create_journal_entry_from_video_response(
+    db_session: Session,
+    response: PostVideoResponse,
+    user_hash: str,
+) -> Optional[JournalEntries]:
+    """
+    FIX Issue #10: Create a journal entry from the post-video response
+    so that user reflections appear in the timeline.
+    
+    Only creates an entry if there is meaningful content (insights text,
+    value, or action).
+    
+    Args:
+        db_session: Database session
+        response: PostVideoResponse object
+        user_hash: User hash
+    
+    Returns:
+        Created JournalEntries object, or None if no content to save
+    """
+    if not user_hash:
+        print("[chills] No user_hash, skipping journal entry creation")
+        return None
+
+    # Build the journal body from available response data
+    body_parts = []
+
+    if response.insights_text and response.insights_text.strip():
+        body_parts.append(response.insights_text.strip())
+
+    value_text = response.value_custom or response.value_selected
+    if value_text and value_text.strip():
+        body_parts.append(f"What felt important: {value_text.strip()}")
+
+    action_text = response.action_custom or response.action_selected
+    if action_text and action_text.strip():
+        body_parts.append(f"My intention: {action_text.strip()}")
+
+    # Only create entry if there is actual content
+    if not body_parts:
+        print(f"[chills] No meaningful content in post-video response for session {response.session_id}, skipping journal entry")
+        return None
+
+    body = "\n\n".join(body_parts)
+
+    # Build meta JSON for the journal entry
+    meta = {
+        "source": "video_reflection",
+        "session_id": response.session_id,
+        "value_selected": response.value_selected,
+        "action_selected": response.action_selected,
+    }
+
+    # Check if a journal entry already exists for this session to avoid duplicates
+    existing_entry = (
+        db_session.query(JournalEntries)
+        .filter(
+            JournalEntries.user_hash == user_hash,
+            JournalEntries.session_id == response.session_id,
+            JournalEntries.entry_type == "video_reflection",
+        )
+        .first()
+    )
+
+    if existing_entry:
+        # Update existing entry instead of creating a duplicate
+        existing_entry.body = body
+        existing_entry.meta_json = json.dumps(meta)
+        existing_entry.date = datetime.utcnow().date()
+        db_session.commit()
+        db_session.refresh(existing_entry)
+        print(f"[chills] Updated existing journal entry id={existing_entry.id} for session {response.session_id}")
+        return existing_entry
+
+    # Create new journal entry
+    try:
+        entry = JournalEntries(
+            user_hash=user_hash,
+            session_id=response.session_id,
+            entry_type="video_reflection",
+            title="Video Reflection",
+            body=body,
+            meta_json=json.dumps(meta),
+            date=datetime.utcnow().date(),
+        )
+        db_session.add(entry)
+        db_session.commit()
+        db_session.refresh(entry)
+        print(f"[chills] Created journal entry id={entry.id} for video reflection session {response.session_id}")
+        return entry
+    except Exception as e:
+        print(f"[chills] Error creating journal entry from video response: {e}")
+        db_session.rollback()
+        return None
+
+
 # ============================================================================
 # CHILLS TIMESTAMP ENDPOINTS
 # ============================================================================
@@ -619,6 +718,8 @@ def record_post_video_response(x: PostVideoResponseIn, q: Session = Depends(db))
     - value_selected helps personalize future recommendations
     - insights_text is stored for journaling/reflection
     
+    FIX Issue #10: Now also creates a journal entry so reflections appear in timeline.
+    
     Args:
         x: PostVideoResponseIn with all response fields
         q: Database session
@@ -677,6 +778,16 @@ def record_post_video_response(x: PostVideoResponseIn, q: Session = Depends(db))
     action_for_activities = _get_action_for_activity_generation(response)
     if action_for_activities:
         print(f"[chills] Action for activity generation: '{action_for_activities}'")
+    
+    # =========================================================================
+    # FIX Issue #10: Create journal entry from video response
+    # This ensures the user's reflections appear in the timeline
+    # =========================================================================
+    try:
+        _create_journal_entry_from_video_response(q, response, user_hash)
+    except Exception as journal_err:
+        # Don't fail the main response if journal creation fails
+        print(f"[chills] Warning: Could not create journal entry: {journal_err}")
     
     return PostVideoResponseOut(
         id=response.id,
