@@ -129,10 +129,6 @@ class BodyMapBatchIn(BaseModel):
 class PostVideoResponseIn(BaseModel):
     """Request model for post-video response."""
     session_id: str
-    felt_chills: Optional[bool] = Field(
-        None,
-        description="Did the user feel chills during the video? Yes=True, No=False"
-    )
     insights_text: Optional[str] = Field(
         None,
         max_length=2000,
@@ -169,7 +165,6 @@ class PostVideoResponseOut(BaseModel):
     """Response model for post-video response."""
     id: int
     session_id: str
-    felt_chills: Optional[bool] = None
     insights_text: Optional[str]
     value_selected: Optional[str]
     value_custom: Optional[str]
@@ -748,7 +743,6 @@ def record_post_video_response(x: PostVideoResponseIn, q: Session = Depends(db))
     
     if existing:
         # Update existing response
-        existing.felt_chills = x.felt_chills
         existing.insights_text = x.insights_text
         existing.value_selected = x.value_selected
         existing.value_custom = x.value_custom
@@ -767,7 +761,6 @@ def record_post_video_response(x: PostVideoResponseIn, q: Session = Depends(db))
         response = PostVideoResponse(
             session_id=x.session_id,
             user_hash=user_hash,
-            felt_chills=x.felt_chills,
             insights_text=x.insights_text,
             value_selected=x.value_selected,
             value_custom=x.value_custom,
@@ -799,7 +792,6 @@ def record_post_video_response(x: PostVideoResponseIn, q: Session = Depends(db))
     return PostVideoResponseOut(
         id=response.id,
         session_id=response.session_id,
-        felt_chills=getattr(response, 'felt_chills', None),
         insights_text=response.insights_text,
         value_selected=response.value_selected,
         value_custom=response.value_custom,
@@ -833,7 +825,6 @@ def get_post_video_response(session_id: str, q: Session = Depends(db)):
     return PostVideoResponseOut(
         id=response.id,
         session_id=response.session_id,
-        felt_chills=getattr(response, 'felt_chills', None),
         insights_text=response.insights_text,
         value_selected=response.value_selected,
         value_custom=response.value_custom,
