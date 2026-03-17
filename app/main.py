@@ -474,6 +474,21 @@ def run_migrations():
             except Exception as seed_err:
                 print(f"[migration] Error seeding video_stimuli (non-fatal): {seed_err}")
             
+            # -----------------------------------------------------------------
+            # Migration 10: Add felt_chills column to post_video_responses table
+            # Stores whether the user reported feeling chills (Yes/No) after video
+            # -----------------------------------------------------------------
+            try:
+                result = conn.execute(text("PRAGMA table_info(post_video_responses)"))
+                pvr_cols_m10 = [row[1] for row in result.fetchall()]
+                
+                if 'felt_chills' not in pvr_cols_m10:
+                    conn.execute(text("ALTER TABLE post_video_responses ADD COLUMN felt_chills BOOLEAN"))
+                    conn.commit()
+                    print("[migration] Added felt_chills column to post_video_responses table")
+            except Exception as m10_err:
+                print(f"[migration] Migration 10 error (non-fatal): {m10_err}")
+            
             print("[migration] All migrations completed successfully")
             
     except Exception as e:
