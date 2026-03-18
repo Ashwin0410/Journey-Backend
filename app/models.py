@@ -1024,6 +1024,13 @@ class PostVideoResponse(Base):
     id = Column(Integer, primary_key=True, index=True)
     session_id = Column(String, index=True, nullable=False)
     user_hash = Column(String, index=True, nullable=True)
+    
+    # =============================================================================
+    # NEW FIELD: Did the user feel chills? (Yes/No gate after video)
+    # Issue #2: Added to capture binary chills response before body map
+    # =============================================================================
+    felt_chills = Column(Boolean, nullable=True)
+    
     insights_text = Column(Text, nullable=True)
     value_selected = Column(String, nullable=True)
     value_custom = Column(String, nullable=True)
