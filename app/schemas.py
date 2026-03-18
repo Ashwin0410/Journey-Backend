@@ -876,6 +876,10 @@ class VideoSuggestionOut(BaseModel):
     video: Optional[VideoStimulusOut] = None
     journey_day: Optional[int] = None
     reason: Optional[str] = None  # Why this video was suggested
+    # Issue #7: Hourly video rotation - cooldown fields
+    cooldown: bool = False  # True if user watched a video within the last hour
+    minutes_remaining: Optional[int] = None  # Minutes until next video is available
+    next_available_at: Optional[datetime] = None  # Exact time next video unlocks
 
 
 class VideoSuggestionListOut(BaseModel):
@@ -931,6 +935,8 @@ class BodyMapOut(BaseModel):
 class ChillsResponseIn(BaseModel):
     """Schema for post-video chills response (insights, value, action)."""
     session_id: str
+    # Issue #2: Binary "Did you get chills?" Yes/No gate after video
+    felt_chills: Optional[bool] = None
     insights_text: Optional[str] = None  # "What stood out to you?"
     value_selected: Optional[str] = None  # Selected value (Connection, Growth, etc.)
     value_custom: Optional[str] = None  # Custom value if "Other" selected
@@ -943,6 +949,8 @@ class ChillsResponseOut(BaseModel):
     """Schema for chills response output."""
     id: int
     session_id: str
+    # Issue #2: Binary "Did you get chills?" Yes/No
+    felt_chills: Optional[bool] = None
     insights_text: Optional[str] = None
     value_selected: Optional[str] = None
     action_today: Optional[str] = None  # Final action (selected or custom)
