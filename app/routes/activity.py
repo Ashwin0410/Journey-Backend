@@ -84,38 +84,74 @@ def _nearby_places(
 ) -> List[PlaceDetail]:
     """
     Returns list of place details with name, lat, lng, and place_id.
+    Updated to use Places API (New) endpoint format.
     """
     if not c.GOOGLE_MAPS_API_KEY:
         return []
 
-    url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
-    params = {
-        "location": f"{lat},{lng}",
-        "radius": radius_m,
-        "type": place_type,
-        "key": c.GOOGLE_MAPS_API_KEY,
+    # ==========================================================================
+    # Issue #5: Use Places API (New) endpoint — legacy nearbysearch is disabled
+    # on newer Google Cloud projects
+    # ==========================================================================
+    url = "https://places.googleapis.com/v1/places:searchNearby"
+    
+    # Map legacy place types to new API included types
+    type_mapping = {
+        "park": "park",
+        "cafe": "cafe",
+        "tourist_attraction": "tourist_attraction",
+        "shopping_mall": "shopping_mall",
+        "movie_theater": "movie_theater",
+        "library": "library",
+        "gym": "gym",
+        "restaurant": "restaurant",
+        "museum": "museum",
+        "spa": "spa",
+    }
+    
+    included_type = type_mapping.get(place_type, place_type)
+    
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": c.GOOGLE_MAPS_API_KEY,
+        "X-Goog-FieldMask": "places.displayName,places.location,places.id",
+    }
+    
+    body = {
+        "includedTypes": [included_type],
+        "maxResultCount": min(max_results, 20),
+        "locationRestriction": {
+            "circle": {
+                "center": {
+                    "latitude": lat,
+                    "longitude": lng,
+                },
+                "radius": float(radius_m),
+            }
+        },
     }
 
     try:
-        resp = requests.get(url, params=params, timeout=8)
+        resp = requests.post(url, json=body, headers=headers, timeout=8)
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
-        print(f"[activity] Places error for type '{place_type}': {e}")
+        print(f"[activity] Places API (New) error for type '{place_type}': {e}")
         return []
 
-    results = data.get("results") or []
+    results = data.get("places") or []
     places: List[PlaceDetail] = []
 
     for r_ in results:
         if len(places) >= max_results:
             break
 
-        name = r_.get("name")
-        loc = (r_.get("geometry") or {}).get("location") or {}
-        lat2 = loc.get("lat")
-        lng2 = loc.get("lng")
-        place_id = r_.get("place_id")
+        display_name = r_.get("displayName") or {}
+        name = display_name.get("text") if isinstance(display_name, dict) else str(display_name)
+        location = r_.get("location") or {}
+        lat2 = location.get("latitude")
+        lng2 = location.get("longitude")
+        place_id = r_.get("id") or ""
 
         if not name or lat2 is None or lng2 is None:
             continue
@@ -128,7 +164,7 @@ def _nearby_places(
             "name": name.strip(),
             "lat": float(lat2),
             "lng": float(lng2),
-            "place_id": place_id or "",
+            "place_id": place_id,
         })
 
     return places
