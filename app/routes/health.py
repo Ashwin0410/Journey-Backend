@@ -49,26 +49,39 @@ def maps_diagnostic():
             results["geocoding_test"]["lat"] = lat
             results["geocoding_test"]["lng"] = lng
             
-            # Test 2: Places API — find cafes near Liverpool
+            # Test 2: Places API (New) — find cafes near Liverpool
             try:
-                places_url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
-                places_resp = requests.get(places_url, params={
-                    "location": f"{lat},{lng}",
-                    "radius": 1200,
-                    "type": "cafe",
-                    "key": key,
-                }, timeout=10)
+                places_url = "https://places.googleapis.com/v1/places:searchNearby"
+                places_headers = {
+                    "Content-Type": "application/json",
+                    "X-Goog-Api-Key": key,
+                    "X-Goog-FieldMask": "places.displayName,places.location,places.id",
+                }
+                places_body = {
+                    "includedTypes": ["cafe"],
+                    "maxResultCount": 5,
+                    "locationRestriction": {
+                        "circle": {
+                            "center": {"latitude": lat, "longitude": lng},
+                            "radius": 1200.0,
+                        }
+                    },
+                }
+                places_resp = requests.post(places_url, json=places_body, headers=places_headers, timeout=10)
                 places_data = places_resp.json()
                 
                 place_names = []
-                for p in (places_data.get("results") or [])[:5]:
-                    place_names.append(p.get("name"))
+                for p in (places_data.get("places") or [])[:5]:
+                    dn = p.get("displayName") or {}
+                    name = dn.get("text") if isinstance(dn, dict) else str(dn)
+                    if name:
+                        place_names.append(name)
                 
                 results["places_test"] = {
-                    "status": places_data.get("status"),
-                    "error_message": places_data.get("error_message"),
+                    "status": "OK" if place_names else places_data.get("error", {}).get("status", "NO_RESULTS"),
+                    "error_message": places_data.get("error", {}).get("message"),
                     "http_status": places_resp.status_code,
-                    "places_found": len(places_data.get("results") or []),
+                    "places_found": len(places_data.get("places") or []),
                     "sample_places": place_names,
                 }
             except Exception as e:
