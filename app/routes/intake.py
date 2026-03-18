@@ -990,22 +990,77 @@ def get_video_for_today(
     db: Session = Depends(get_db),
 ):
     """
-    Get today's video recommendation based on user's journey day.
+    Get the next video recommendation for the user.
     
-    Day 1 = rank #1 video, Day 2 = rank #2 video, etc.
-    If journey_day > 10 (we only have 10 suggestions), it wraps around.
+    Issue #7: HOURLY VIDEO ROTATION
+    - Videos rotate every hour (not every day).
+    - Rank is based on total videos watched: 1st watch = rank 1, 2nd = rank 2, etc.
+    - If user watched a video within the last hour, returns cooldown=True
+      with minutes_remaining, BUT still includes the video data so the
+      frontend can offer a "Watch anyway" option (soft gate, not hard block).
+    - Wraps around after 10 suggestions.
     """
     user_hash = current_user.user_hash
     journey_day = current_user.journey_day or 1
     
     print(f"[intake] Getting video for today: user={user_hash}, journey_day={journey_day}")
     
-    # Wrap around if we've gone past 10 days
-    effective_rank = ((journey_day - 1) % 10) + 1
+    # =========================================================================
+    # Issue #7: Check last watch time for hourly cooldown
+    # =========================================================================
+    cooldown = False
+    minutes_remaining = None
+    next_available_at = None
     
-    print(f"[intake] Effective rank for day {journey_day} = {effective_rank}")
+    # Find the most recent post_video_response for this user (indicates a completed watch)
+    last_response = (
+        db.query(models.PostVideoResponse)
+        .filter(models.PostVideoResponse.user_hash == user_hash)
+        .order_by(models.PostVideoResponse.created_at.desc())
+        .first()
+    )
     
-    # Get the suggestion for this day
+    if last_response and last_response.created_at:
+        from datetime import timedelta
+        now = datetime.utcnow()
+        last_watch_time = last_response.created_at
+        
+        # Handle timezone-aware vs naive datetime
+        if last_watch_time.tzinfo is not None:
+            from datetime import timezone
+            now = datetime.now(timezone.utc)
+        
+        time_since_last = now - last_watch_time
+        one_hour = timedelta(hours=1)
+        
+        if time_since_last < one_hour:
+            cooldown = True
+            remaining_seconds = (one_hour - time_since_last).total_seconds()
+            minutes_remaining = max(1, int(remaining_seconds / 60))
+            next_available_at_dt = last_watch_time + one_hour
+            # Convert to ISO string for JSON serialization
+            next_available_at = next_available_at_dt.isoformat()
+            print(f"[intake] Cooldown active: {minutes_remaining} min remaining (last watch: {last_watch_time})")
+        else:
+            print(f"[intake] No cooldown: last watch was {time_since_last} ago")
+    else:
+        print(f"[intake] No previous watches found for user {user_hash}")
+    
+    # =========================================================================
+    # Issue #7: Rank based on total completed watches (hourly rotation)
+    # =========================================================================
+    total_watches = (
+        db.query(models.PostVideoResponse)
+        .filter(models.PostVideoResponse.user_hash == user_hash)
+        .count()
+    )
+    
+    # Next video rank: 1st watch = rank 1, 2nd = rank 2, etc. Wraps at 10.
+    effective_rank = (total_watches % 10) + 1
+    
+    print(f"[intake] Total watches={total_watches}, effective_rank={effective_rank}")
+    
+    # Get the suggestion for this rank
     suggestion = (
         db.query(models.StimuliSuggestion)
         .filter(
@@ -1031,9 +1086,12 @@ def get_video_for_today(
             "has_video": False,
             "message": "No video suggestions found. Please complete the ML questionnaire first.",
             "video": None,
+            "cooldown": False,
+            "minutes_remaining": None,
+            "next_available_at": None,
         }
     
-    print(f"[intake] Returning video: {suggestion.stimulus_name} (rank={suggestion.stimulus_rank})")
+    print(f"[intake] Returning video: {suggestion.stimulus_name} (rank={suggestion.stimulus_rank}, cooldown={cooldown})")
     
     return {
         "has_video": True,
@@ -1045,4 +1103,8 @@ def get_video_for_today(
             "stimulus_description": suggestion.stimulus_description,
             "score": suggestion.score,
         },
+        # Issue #7: Cooldown fields (soft gate - video data is still included)
+        "cooldown": cooldown,
+        "minutes_remaining": minutes_remaining,
+        "next_available_at": next_available_at,
     }
