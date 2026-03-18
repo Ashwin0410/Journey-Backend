@@ -345,6 +345,7 @@ def run_migrations():
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         session_id TEXT NOT NULL UNIQUE,
                         user_hash TEXT,
+                        felt_chills BOOLEAN,
                         insights_text TEXT,
                         value_selected TEXT,
                         value_custom TEXT,
@@ -366,6 +367,15 @@ def run_migrations():
                     conn.execute(text("ALTER TABLE post_video_responses ADD COLUMN user_hash TEXT"))
                     conn.commit()
                     print("[migration] Added user_hash column to post_video_responses")
+                
+                # ---------------------------------------------------------
+                # Migration 7b: Add felt_chills column to post_video_responses
+                # Issue #2: Binary "Did you get chills?" Yes/No after video
+                # ---------------------------------------------------------
+                if 'felt_chills' not in pvr_cols:
+                    conn.execute(text("ALTER TABLE post_video_responses ADD COLUMN felt_chills BOOLEAN"))
+                    conn.commit()
+                    print("[migration] Added felt_chills column to post_video_responses")
             
             # -----------------------------------------------------------------
             # Migration 8: Create ml_questionnaires table (if model uses it)
