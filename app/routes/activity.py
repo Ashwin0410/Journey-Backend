@@ -767,10 +767,16 @@ def _fallback_context_from_history(db: Session, user_hash: Optional[str]) -> dic
 
     # Fallback to old behavior if no chills context
     try:
-        # user profile postal_code if present
-        u = db.query(models.Users).filter(models.Users.user_hash == user_hash).first()
-        if u and getattr(u, "postal_code", None):
-            out["postal_code"] = getattr(u, "postal_code")
+        # BUG FIX Issue #5: postal_code is on ClinicalIntake, NOT Users
+        intake = (
+            db.query(models.ClinicalIntake)
+            .filter(models.ClinicalIntake.user_hash == user_hash)
+            .order_by(models.ClinicalIntake.created_at.desc())
+            .first()
+        )
+        if intake and getattr(intake, "postal_code", None):
+            out["postal_code"] = intake.postal_code
+            print(f"[activity] Fallback: Got postal_code from ClinicalIntake: {intake.postal_code}")
     except Exception:
         pass
 
@@ -1869,16 +1875,24 @@ def generate_from_action(
     
     print(f"[activity] /from-action called for user {user_hash}, action='{action_today}', session={session_id}, gps=({gps_lat}, {gps_lng})")
     
-    # Get postal code from user if not provided via GPS
+    # Get postal code from ClinicalIntake if not provided via GPS
+    # BUG FIX Issue #5: postal_code lives on ClinicalIntake, NOT Users
     postal_code = None
     if gps_lat is None or gps_lng is None:
         try:
-            user = db.query(models.Users).filter(models.Users.user_hash == user_hash).first()
-            if user and getattr(user, 'postal_code', None):
-                postal_code = user.postal_code
-                print(f"[activity] Using postal_code from user profile: {postal_code}")
-        except Exception:
-            pass
+            intake = (
+                db.query(models.ClinicalIntake)
+                .filter(models.ClinicalIntake.user_hash == user_hash)
+                .order_by(models.ClinicalIntake.created_at.desc())
+                .first()
+            )
+            if intake and getattr(intake, 'postal_code', None):
+                postal_code = intake.postal_code
+                print(f"[activity] Using postal_code from ClinicalIntake: {postal_code}")
+            else:
+                print(f"[activity] No postal_code found in ClinicalIntake for user {user_hash}")
+        except Exception as e:
+            print(f"[activity] Error fetching postal_code: {e}")
     
     # Generate session ID for linking activities to this video session
     video_session_id = session_id or str(uuid.uuid4())
