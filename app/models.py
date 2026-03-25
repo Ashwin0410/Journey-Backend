@@ -1037,3 +1037,59 @@ class PostVideoResponse(Base):
     action_selected = Column(String, nullable=True)
     action_custom = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+# =============================================================================
+# RECURRING PHQ-9 HEALTH CHECK (Issue #10)
+# =============================================================================
+
+
+class Phq9Assessment(Base):
+    """
+    Standalone PHQ-9 assessment for recurring health checks.
+    
+    Issue #10: Felix wants PHQ-9 to recur every 6 days as a health check.
+    This model is separate from the onboarding-linked Phq9ItemResponse
+    (which requires an intake_id foreign key to clinical_intakes).
+    
+    Each row represents one complete PHQ-9 assessment (all 9 questions).
+    Individual question scores are stored as JSON for simplicity.
+    The total_score is computed and cached for quick access.
+    
+    Flow:
+    - Backend checks days since last PHQ-9 (from Users.last_phq9_date)
+    - If >= 6 days, /api/today returns needs_phq9: true
+    - Frontend shows PHQ-9 wizard before daily video
+    - On submission, POST /api/intake/phq9-recurring saves here
+    - Users.last_phq9_date is updated
+    """
+    __tablename__ = "phq9_assessments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_hash = Column(String, index=True, nullable=False)
+    
+    # Assessment type: "onboarding" (first time) or "recurring" (health check)
+    assessment_type = Column(String, default="recurring", index=True)
+    
+    # Individual question scores stored as JSON
+    # Format: {"q1": 0, "q2": 1, "q3": 2, ..., "q9": 0}
+    scores_json = Column(Text, nullable=False)
+    
+    # Computed total score (sum of q1-q9, range 0-27)
+    total_score = Column(Integer, nullable=False)
+    
+    # PHQ-9 severity classification based on total score:
+    # 0-4: Minimal, 5-9: Mild, 10-14: Moderate, 15-19: Moderately Severe, 20-27: Severe
+    severity = Column(String, nullable=True)
+    
+    # Safety flag: True if Q9 (self-harm) score > 0
+    q9_flagged = Column(Boolean, default=False)
+    q9_score = Column(Integer, nullable=True)
+    
+    # Optional notes from user
+    notes = Column(Text, nullable=True)
+    
+    # Journey day when this assessment was taken
+    journey_day = Column(Integer, nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
