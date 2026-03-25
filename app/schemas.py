@@ -208,6 +208,10 @@ class TodaySummaryOut(BaseModel):
     
     # FIX Issue #6: Added stats field for day streak and activities count
     stats: Optional[StatsOut] = None
+    
+    # Issue #10: Recurring PHQ-9 health check flag
+    needs_phq9: bool = False
+    phq9_days_overdue: int = 0
 
 
 
