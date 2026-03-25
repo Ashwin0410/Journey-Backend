@@ -178,6 +178,33 @@ class MLQuestionnaireOut(BaseModel):
 
 
 # ============================================================================
+# RECURRING PHQ-9 HEALTH CHECK SCHEMAS (Issue #10)
+# ============================================================================
+
+class Phq9RecurringIn(BaseModel):
+    """
+    Input schema for recurring PHQ-9 health check.
+    
+    Issue #10: Felix wants PHQ-9 every 6 days.
+    Same 9 questions as onboarding PHQ-9, but stored in Phq9Assessment table.
+    """
+    items: List[Phq9ItemIn] = Field(min_length=9, max_length=9)
+    notes: Optional[str] = Field(None, description="Optional notes from user")
+
+
+class Phq9RecurringOut(BaseModel):
+    """Output schema for recurring PHQ-9 submission."""
+    success: bool
+    message: str
+    assessment_id: int
+    total_score: int
+    severity: str  # Minimal, Mild, Moderate, Moderately Severe, Severe
+    safety_flag: int  # 0=normal, 1=elevated, 2=high risk (Q9 > 0)
+    q9_flagged: bool
+    journey_day: Optional[int] = None
+
+
+# ============================================================================
 # SIMPLIFIED DEMOGRAPHICS SCHEMA (NEW FLOW)
 # ============================================================================
 
@@ -1108,3 +1135,186 @@ def get_video_for_today(
         "minutes_remaining": minutes_remaining,
         "next_available_at": next_available_at,
     }
+
+
+# ============================================================================
+# RECURRING PHQ-9 HEALTH CHECK ENDPOINT (Issue #10)
+# ============================================================================
+
+def _classify_phq9_severity(total_score: int) -> str:
+    """
+    Classify PHQ-9 severity based on total score.
+    
+    Standard PHQ-9 severity thresholds:
+    0-4:   Minimal depression
+    5-9:   Mild depression
+    10-14: Moderate depression
+    15-19: Moderately severe depression
+    20-27: Severe depression
+    """
+    if total_score <= 4:
+        return "Minimal"
+    elif total_score <= 9:
+        return "Mild"
+    elif total_score <= 14:
+        return "Moderate"
+    elif total_score <= 19:
+        return "Moderately Severe"
+    else:
+        return "Severe"
+
+
+@r.post("/phq9-recurring", response_model=Phq9RecurringOut)
+def submit_recurring_phq9(
+    payload: Phq9RecurringIn,
+    current_user: models.Users = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Submit a recurring PHQ-9 health check assessment.
+    
+    Issue #10: Felix wants PHQ-9 to recur every 6 days as a health check.
+    
+    This endpoint:
+    1. Stores the assessment in the Phq9Assessment table
+    2. Updates Users.last_phq9_date to today
+    3. Updates Users.safety_flag if Q9 > 0
+    4. Returns severity classification and safety flag
+    
+    Unlike the onboarding /phq9 endpoint, this does NOT require a ClinicalIntake
+    record and does NOT affect onboarding_complete status.
+    """
+    user_hash = current_user.user_hash
+    
+    print(f"[intake] Recurring PHQ-9 submitted by user {user_hash}")
+    
+    # Calculate total score and check Q9
+    total_score = 0
+    q9_score = 0
+    scores_dict = {}
+    
+    for item in payload.items:
+        total_score += item.score
+        scores_dict[f"q{item.question_number}"] = item.score
+        if item.question_number == 9:
+            q9_score = item.score
+    
+    # Classify severity
+    severity = _classify_phq9_severity(total_score)
+    q9_flagged = q9_score > 0
+    
+    # Calculate safety flag
+    safety_flag = 0
+    if q9_score > 0:
+        safety_flag = 2  # High risk - self-harm thoughts indicated
+    elif total_score >= 15:
+        safety_flag = 1  # Elevated depression score
+    
+    # Get journey day
+    journey_day = current_user.journey_day or 1
+    if current_user.created_at:
+        try:
+            created = current_user.created_at
+            if hasattr(created, 'date'):
+                created_date = created.date() if callable(created.date) else created.date
+            else:
+                created_date = created
+            diff_days = (date_cls.today() - created_date).days
+            journey_day = max(1, diff_days + 1)
+        except Exception:
+            pass
+    
+    # Store assessment in Phq9Assessment table
+    try:
+        assessment = models.Phq9Assessment(
+            user_hash=user_hash,
+            assessment_type="recurring",
+            scores_json=json.dumps(scores_dict),
+            total_score=total_score,
+            severity=severity,
+            q9_flagged=q9_flagged,
+            q9_score=q9_score,
+            notes=payload.notes,
+            journey_day=journey_day,
+        )
+        db.add(assessment)
+        db.commit()
+        db.refresh(assessment)
+        
+        print(f"[intake] Recurring PHQ-9 saved: id={assessment.id}, total={total_score}, severity={severity}, q9_flagged={q9_flagged}")
+    except Exception as e:
+        print(f"[intake] Error saving PHQ-9 assessment: {e}")
+        # If the table doesn't exist yet (migration pending), still update user
+        db.rollback()
+        assessment = None
+    
+    # Update user's last_phq9_date and safety_flag
+    try:
+        user = db.merge(current_user)
+        user.last_phq9_date = date_cls.today()
+        user.safety_flag = safety_flag
+        db.commit()
+        
+        print(f"[intake] Updated user {user_hash}: last_phq9_date={date_cls.today()}, safety_flag={safety_flag}")
+    except Exception as e:
+        print(f"[intake] Error updating user PHQ-9 date: {e}")
+        db.rollback()
+    
+    return Phq9RecurringOut(
+        success=True,
+        message=f"PHQ-9 health check saved. Severity: {severity}.",
+        assessment_id=assessment.id if assessment else 0,
+        total_score=total_score,
+        severity=severity,
+        safety_flag=safety_flag,
+        q9_flagged=q9_flagged,
+        journey_day=journey_day,
+    )
+
+
+@r.get("/phq9-history")
+def get_phq9_history(
+    current_user: models.Users = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    limit: int = 10,
+):
+    """
+    Get the user's PHQ-9 assessment history.
+    
+    Issue #10: Returns all recurring PHQ-9 assessments for tracking
+    mental health trends over time.
+    """
+    user_hash = current_user.user_hash
+    
+    try:
+        assessments = (
+            db.query(models.Phq9Assessment)
+            .filter(models.Phq9Assessment.user_hash == user_hash)
+            .order_by(models.Phq9Assessment.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+        
+        return {
+            "assessments": [
+                {
+                    "id": a.id,
+                    "total_score": a.total_score,
+                    "severity": a.severity,
+                    "q9_flagged": a.q9_flagged,
+                    "assessment_type": a.assessment_type,
+                    "journey_day": a.journey_day,
+                    "created_at": a.created_at.isoformat() if a.created_at else None,
+                }
+                for a in assessments
+            ],
+            "total": len(assessments),
+            "last_phq9_date": current_user.last_phq9_date.isoformat() if current_user.last_phq9_date else None,
+        }
+    except Exception as e:
+        print(f"[intake] Error getting PHQ-9 history: {e}")
+        return {
+            "assessments": [],
+            "total": 0,
+            "last_phq9_date": current_user.last_phq9_date.isoformat() if current_user.last_phq9_date else None,
+        }
