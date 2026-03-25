@@ -7,14 +7,16 @@ Used for:
 - Activity reminders
 - Journey session reminders
 - Engagement notifications
+- Daily video ready notifications (Issue #1)
 """
 
 import json
-from datetime import datetime
+from datetime import datetime, date
 from typing import Optional, Dict, Any, List
 
 from pywebpush import webpush, WebPushException
 from sqlalchemy.orm import Session
+from sqlalchemy import func as sa_func
 
 from ..models import PushSubscription, Users
 from ..core.config import cfg
@@ -198,7 +200,7 @@ def send_audio_ready_notification(
     return send_push_to_user(
         db=db,
         user_hash=user_hash,
-        title="Your journey awaits ✨",
+        title="Your journey awaits",
         body=f"Day {journey_day} is ready. Tap to begin when you're ready.",
         tag="audio-ready",
         url="/",
@@ -222,7 +224,7 @@ def send_journey_reminder(
     return send_push_to_user(
         db=db,
         user_hash=user_hash,
-        title="Continue your journey 🌱",
+        title="Continue your journey",
         body="Take a moment for yourself today. Your next session is waiting.",
         tag="journey-reminder",
         url="/",
@@ -245,7 +247,7 @@ def send_activity_reminder(
     return send_push_to_user(
         db=db,
         user_hash=user_hash,
-        title="Activity reminder 🎯",
+        title="Activity reminder",
         body=f"Ready for: {activity_title}?",
         tag=f"activity-{activity_id}",
         url="/",
@@ -266,13 +268,13 @@ def send_streak_notification(
     Celebrate a streak milestone.
     """
     messages = {
-        3: "3 days in a row! You're building momentum 🔥",
-        7: "One week strong! Your consistency is inspiring ⭐",
-        14: "Two weeks! You're rewiring your patterns 🧠",
-        30: "One month! This is real change happening 🎉",
+        3: "3 days in a row! You're building momentum.",
+        7: "One week strong! Your consistency is inspiring.",
+        14: "Two weeks! You're rewiring your patterns.",
+        30: "One month! This is real change happening.",
     }
     
-    body = messages.get(streak_days, f"{streak_days} days! Keep going 💪")
+    body = messages.get(streak_days, f"{streak_days} days! Keep going.")
     
     return send_push_to_user(
         db=db,
@@ -286,6 +288,176 @@ def send_streak_notification(
             "streak_days": streak_days,
         },
     )
+
+
+# =============================================================================
+# DAILY VIDEO NOTIFICATION (Issue #1)
+# =============================================================================
+
+
+def send_daily_video_notification(
+    db: Session,
+    user_hash: str,
+    journey_day: int,
+) -> Dict[str, Any]:
+    """
+    Send "Your daily video is ready!" notification.
+    
+    Issue #1: This is the most important notification — tells users
+    their personalized daily video is waiting for them.
+    
+    Called by the daily scheduler in main.py.
+    """
+    return send_push_to_user(
+        db=db,
+        user_hash=user_hash,
+        title="Your daily video is ready!",
+        body=f"Day {journey_day} — take a few minutes for yourself today.",
+        tag="daily-video",
+        url="/",
+        data={
+            "type": "daily_video",
+            "journey_day": journey_day,
+        },
+    )
+
+
+def send_phq9_reminder(
+    db: Session,
+    user_hash: str,
+) -> Dict[str, Any]:
+    """
+    Send a reminder that a PHQ-9 health check is due.
+    
+    Issue #10: PHQ-9 recurs every 6 days. If user hasn't opened
+    the app, send a push notification to prompt them.
+    """
+    return send_push_to_user(
+        db=db,
+        user_hash=user_hash,
+        title="Quick health check",
+        body="It's time for your brief mental health check-in. Takes less than 2 minutes.",
+        tag="phq9-reminder",
+        url="/",
+        data={
+            "type": "phq9_reminder",
+        },
+    )
+
+
+def send_daily_notifications_to_all(db: Session) -> Dict[str, Any]:
+    """
+    Send daily video notifications to ALL users with active push subscriptions.
+    
+    Issue #1: Called by the background scheduler in main.py.
+    
+    Logic:
+    1. Find all distinct user_hashes that have active push subscriptions
+    2. For each user, look up their journey_day from the Users table
+    3. Only send if user has completed onboarding (has videos to watch)
+    4. Only send if user is not deleted
+    5. Send "Your daily video is ready!" notification
+    
+    Returns:
+        Dict with total users notified, success/failure counts
+    """
+    print("[push] Starting daily notification broadcast...")
+    
+    try:
+        # Get all unique user_hashes with active subscriptions
+        active_user_hashes = (
+            db.query(PushSubscription.user_hash)
+            .filter(PushSubscription.is_active == True)
+            .distinct()
+            .all()
+        )
+        
+        if not active_user_hashes:
+            print("[push] No users with active push subscriptions")
+            return {
+                "success": True,
+                "users_notified": 0,
+                "message": "No active subscriptions",
+            }
+        
+        total_sent = 0
+        total_failed = 0
+        total_skipped = 0
+        
+        for (user_hash,) in active_user_hashes:
+            try:
+                # Look up user to get journey_day and check eligibility
+                user = (
+                    db.query(Users)
+                    .filter(
+                        Users.user_hash == user_hash,
+                        Users.deleted_at == None,
+                    )
+                    .first()
+                )
+                
+                if not user:
+                    total_skipped += 1
+                    continue
+                
+                # Skip users who haven't completed onboarding
+                if not user.onboarding_complete:
+                    total_skipped += 1
+                    continue
+                
+                # Skip users who haven't completed ML questionnaire (no videos)
+                if not user.ml_questionnaire_complete:
+                    total_skipped += 1
+                    continue
+                
+                # Calculate journey day
+                journey_day = user.journey_day or 1
+                if user.created_at:
+                    from datetime import timezone
+                    created = user.created_at
+                    if created.tzinfo is None:
+                        from datetime import timezone as tz
+                        created = created.replace(tzinfo=tz.utc)
+                    now = datetime.now(tz.utc) if 'tz' in dir() else datetime.utcnow()
+                    diff_days = (now.date() - created.date()).days
+                    journey_day = max(1, diff_days + 1)
+                
+                # Send the notification
+                result = send_daily_video_notification(
+                    db=db,
+                    user_hash=user_hash,
+                    journey_day=journey_day,
+                )
+                
+                if result.get("sent", 0) > 0:
+                    total_sent += 1
+                else:
+                    total_failed += 1
+                    
+            except Exception as e:
+                total_failed += 1
+                print(f"[push] Error sending to user {user_hash}: {e}")
+                continue
+        
+        print(f"[push] Daily broadcast complete: sent={total_sent}, failed={total_failed}, skipped={total_skipped}")
+        
+        return {
+            "success": True,
+            "users_notified": total_sent,
+            "users_failed": total_failed,
+            "users_skipped": total_skipped,
+            "total_subscribed_users": len(active_user_hashes),
+        }
+        
+    except Exception as e:
+        print(f"[push] Daily broadcast error: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "success": False,
+            "error": str(e),
+            "users_notified": 0,
+        }
 
 
 def register_subscription(
