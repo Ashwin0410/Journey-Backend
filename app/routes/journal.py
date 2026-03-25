@@ -59,6 +59,18 @@ class JournalAutoSaveOut(BaseModel):
     date: date
 
 
+# ---------- Issue #6: Real-time journal feedback schema ----------
+
+class JournalFeedbackIn(BaseModel):
+    user_hash: str
+    current_text: str
+
+class JournalFeedbackOut(BaseModel):
+    feedback_type: Optional[str] = None  # "insight", "blindspot", "breakthrough", or null
+    feedback_text: Optional[str] = None
+    has_feedback: bool = False
+
+
 # ---------- Existing endpoints ----------
 
 @r.post("/api/journey/journal", response_model=JournalEntryOut)
@@ -311,3 +323,75 @@ def get_today_journal_entry(
     if row:
         return _row_to_schema(row)
     return None
+
+
+# =============================================================================
+# Issue #6: Real-time Journal Feedback (Insight / Blindspot / Breakthrough)
+# =============================================================================
+
+@r.post("/api/journey/journal/realtime-feedback", response_model=JournalFeedbackOut)
+def get_realtime_feedback(
+    x: JournalFeedbackIn,
+    q: Session = Depends(db),
+):
+    """
+    Provide real-time feedback on a journal entry as the user types.
+    
+    Called by frontend with debounce (~3-5 seconds after user stops typing).
+    Analyzes current text + past journal entries and returns one of:
+    - Insight: connecting patterns across multiple entries
+    - Blindspot: recurring pattern causing suffering user may not see
+    - Breakthrough: potentially life-changing realization
+    
+    Returns null feedback if text is too short or no meaningful feedback found.
+    """
+    current_text = (x.current_text or "").strip()
+    
+    # Don't analyze very short text (minimum ~20 words for meaningful feedback)
+    word_count = len(current_text.split())
+    if word_count < 15:
+        return JournalFeedbackOut(has_feedback=False)
+    
+    # Fetch recent journal entries for context (last 20 entries, up to 30 days)
+    thirty_days_ago = datetime.utcnow().date() - timedelta(days=30)
+    past_entries = (
+        q.query(JournalEntries)
+        .filter(
+            JournalEntries.user_hash == x.user_hash,
+            JournalEntries.date >= thirty_days_ago,
+        )
+        .order_by(JournalEntries.date.desc())
+        .limit(20)
+        .all()
+    )
+    
+    # Build context from past entries
+    past_context = ""
+    if past_entries:
+        entry_texts = []
+        for entry in past_entries:
+            entry_date_str = entry.date.isoformat() if entry.date else "unknown"
+            body_preview = (entry.body or "")[:500]  # Limit each entry to 500 chars
+            if body_preview.strip():
+                entry_texts.append(f"[{entry_date_str}] {body_preview}")
+        
+        if entry_texts:
+            past_context = "\n---\n".join(entry_texts[:10])  # Max 10 entries for context
+    
+    # Call LLM for feedback
+    try:
+        from app.services.journal_insights import generate_journal_feedback
+        result = generate_journal_feedback(current_text, past_context)
+        
+        if result and result.get("feedback_type") and result.get("feedback_text"):
+            return JournalFeedbackOut(
+                feedback_type=result["feedback_type"],
+                feedback_text=result["feedback_text"],
+                has_feedback=True,
+            )
+        
+        return JournalFeedbackOut(has_feedback=False)
+        
+    except Exception as e:
+        print(f"[journal] Real-time feedback error (non-fatal): {e}")
+        return JournalFeedbackOut(has_feedback=False)
