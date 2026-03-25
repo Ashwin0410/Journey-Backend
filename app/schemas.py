@@ -231,6 +231,11 @@ class UserOut(BaseModel):
     safety_flag: Optional[int] = None
     last_phq9_date: Optional[date] = None
 
+    # Issue #3: Terms of Service acceptance
+    tos_accepted_at: Optional[datetime] = None
+    # Issue #2: Stripe subscription status
+    subscription_status: Optional[str] = None
+
     class Config:
         orm_mode = True
 
