@@ -311,7 +311,7 @@ def google_callback(
 
 
 # ============================================================================
-# CURRENT USER ENDPOINT (EXISTING)
+# CURRENT USER ENDPOINT (EXISTING - UPDATED with tos_accepted + subscription)
 # ============================================================================
 
 
@@ -358,6 +358,35 @@ def get_me(
 
 
 # ============================================================================
+# TERMS OF SERVICE ACCEPTANCE (Issue #3)
+# ============================================================================
+
+
+@r.post("/accept-tos")
+def accept_tos(
+    current_user: models.Users = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Record user's acceptance of the Terms of Service.
+    Called after user reads and clicks "I Accept" on the ToS screen.
+    """
+    user = current_user
+    
+    if user.deleted_at is not None:
+        raise HTTPException(status_code=401, detail="Account not found.")
+    
+    user.tos_accepted_at = datetime.utcnow()
+    db.commit()
+    db.refresh(user)
+    
+    return {
+        "status": "accepted",
+        "tos_accepted_at": user.tos_accepted_at.isoformat() if user.tos_accepted_at else None,
+    }
+
+
+# ============================================================================
 # EMAIL/PASSWORD AUTHENTICATION ENDPOINTS (NEW)
 # ============================================================================
 
@@ -375,8 +404,8 @@ def register(
     - Returns the user object (frontend will need to call /login to get token)
     
     SOFT DELETE BEHAVIOR:
-    - If email exists with deleted_at=NULL → reject (account already exists)
-    - If email exists with deleted_at set → clear old email, allow registration
+    - If email exists with deleted_at=NULL -> reject (account already exists)
+    - If email exists with deleted_at set -> clear old email, allow registration
     """
     
     # ==========================================================================
@@ -458,8 +487,11 @@ def login(
     - Returns JWT token and user object
     
     SOFT DELETE BEHAVIOR:
-    - If user is deleted (deleted_at is set) → reject login
+    - If user is deleted (deleted_at is set) -> reject login
     - User must sign up again to create new account
+    
+    Issue #4 FIX: Returns distinct error_code so frontend can distinguish
+    between "no account" (auto-switch to register) and "wrong password".
     """
     
     # ==========================================================================
@@ -475,23 +507,40 @@ def login(
     )
     
     if not user:
+        # ======================================================================
+        # Issue #4 FIX: Return "no_account" error_code so frontend can
+        # auto-switch to the Register tab and pre-fill the email
+        # ======================================================================
         raise HTTPException(
             status_code=401,
-            detail="Invalid email or password",
+            detail={
+                "message": "No account found with this email. Would you like to create one?",
+                "error_code": "no_account",
+                "email": payload.email,
+            },
         )
     
     # Check if this is an email user (has password_hash)
     if user.provider != "email" or not user.password_hash:
         raise HTTPException(
             status_code=401,
-            detail="This account uses Google sign-in. Please use 'Sign in with Google'.",
+            detail={
+                "message": "This account uses Google sign-in. Please use 'Sign in with Google'.",
+                "error_code": "google_account",
+            },
         )
     
     # Verify password
     if not verify_password(payload.password, user.password_hash):
+        # ======================================================================
+        # Issue #4 FIX: Return "wrong_password" error_code distinct from no_account
+        # ======================================================================
         raise HTTPException(
             status_code=401,
-            detail="Invalid email or password",
+            detail={
+                "message": "Incorrect password. Please try again.",
+                "error_code": "wrong_password",
+            },
         )
     
     # Update journey day if needed
@@ -528,5 +577,7 @@ def login(
             "onboarding_complete": user.onboarding_complete,
             "safety_flag": user.safety_flag,
             "last_phq9_date": str(user.last_phq9_date) if user.last_phq9_date else None,
+            "tos_accepted": user.tos_accepted_at is not None,
+            "subscription_status": user.subscription_status,
         },
     }
