@@ -217,6 +217,23 @@ class Users(Base):
     # - Old data preserved for analytics/audit under old user_hash
     deleted_at = Column(DateTime(timezone=True), nullable=True, index=True)
 
+    # =============================================================================
+    # TERMS OF SERVICE ACCEPTANCE (Issue #3)
+    # =============================================================================
+    # Timestamp when user accepted the Terms of Use.
+    # NULL means user has not yet accepted. Must accept before proceeding to intake.
+    tos_accepted_at = Column(DateTime(timezone=True), nullable=True)
+
+    # =============================================================================
+    # STRIPE SUBSCRIPTION (Issue #2 - Paywall)
+    # =============================================================================
+    # Stripe customer ID (created when user first hits paywall)
+    stripe_customer_id = Column(String, nullable=True, index=True)
+    # Stripe subscription ID for the active subscription
+    subscription_id = Column(String, nullable=True)
+    # Subscription status: active, canceled, past_due, trialing, unpaid, incomplete, null
+    subscription_status = Column(String, nullable=True, index=True)
+
 
 
 
@@ -1091,5 +1108,55 @@ class Phq9Assessment(Base):
     
     # Journey day when this assessment was taken
     journey_day = Column(Integer, nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+# =============================================================================
+# EXTERNAL EVENT CACHE (Issue #5 - Eventbrite / Luma / Partiful)
+# =============================================================================
+
+
+class ExternalEvent(Base):
+    """
+    Cached external events from Eventbrite (and future: Luma, Partiful).
+    
+    Events are fetched periodically and cached here to avoid hitting
+    external APIs on every activity recommendation request.
+    Events expire after 24 hours and are re-fetched.
+    """
+    __tablename__ = "external_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    
+    # Source platform
+    source = Column(String, nullable=False, index=True)  # "eventbrite", "luma", "partiful"
+    external_id = Column(String, nullable=False, index=True)  # Platform-specific event ID
+    
+    # Event details
+    name = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    url = Column(String, nullable=False)  # Link to event page / RSVP
+    image_url = Column(String, nullable=True)
+    
+    # Location
+    venue_name = Column(String, nullable=True)
+    address = Column(String, nullable=True)
+    city = Column(String, nullable=True, index=True)
+    lat = Column(Float, nullable=True)
+    lng = Column(Float, nullable=True)
+    
+    # Timing
+    start_time = Column(DateTime(timezone=True), nullable=True, index=True)
+    end_time = Column(DateTime(timezone=True), nullable=True)
+    
+    # Categorization
+    category = Column(String, nullable=True, index=True)  # "wellness", "music", "social", etc.
+    is_free = Column(Boolean, default=False)
+    price_text = Column(String, nullable=True)  # "Free", "$10", "$15-25"
+    
+    # Cache management
+    fetched_at = Column(DateTime(timezone=True), server_default=func.now())
+    expires_at = Column(DateTime(timezone=True), nullable=True)
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
