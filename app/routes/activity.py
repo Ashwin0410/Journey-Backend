@@ -15,6 +15,11 @@ from app import models, schemas
 from app.core.config import cfg as c
 from app.services import narrative as narrative_service
 
+# Issue #5: External event integration (Eventbrite)
+try:
+    from app.services.events_external import fetch_nearby_events
+except ImportError:
+    fetch_nearby_events = None
 
 
 from openai import OpenAI
@@ -32,6 +37,51 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+# =============================================================================
+# Issue #5: Convert external events to activity format
+# =============================================================================
+
+def _external_events_as_activities(
+    lat: Optional[float],
+    lng: Optional[float],
+    db_session: Session,
+    limit: int = 4,
+) -> List[schemas.ActivityOut]:
+    """Fetch nearby Eventbrite events and convert to ActivityOut format."""
+    if fetch_nearby_events is None or not lat or not lng:
+        return []
+    try:
+        events = fetch_nearby_events(lat=lat, lng=lng, radius_km=10, limit=limit, db_session=db_session)
+        out: List[schemas.ActivityOut] = []
+        for ev in events:
+            tags = ["event", ev.get("source", "eventbrite")]
+            if ev.get("category"):
+                tags.append(ev["category"])
+            if ev.get("is_free"):
+                tags.append("free")
+            out.append(schemas.ActivityOut(
+                id=-(900000 + ev.get("id", 0)),  # Negative ID range for events
+                title=ev.get("name", "Local Event"),
+                description=(ev.get("description") or "")[:300],
+                life_area="Connection",
+                effort_level="low",
+                reward_type="social",
+                default_duration_min=60,
+                location_label=ev.get("venue_name") or ev.get("address") or "Nearby",
+                tags=tags,
+                user_hash=None,
+                lat=ev.get("lat"),
+                lng=ev.get("lng"),
+                place_id=None,
+            ))
+        if out:
+            print(f"[activity] Added {len(out)} external events to activity list")
+        return out
+    except Exception as e:
+        print(f"[activity] External events fetch error (non-fatal): {e}")
+        return []
 
 
 
@@ -1429,6 +1479,18 @@ def get_library(
                 place_id=a.place_id,
             )
         )
+
+    # Issue #5: Append nearby external events (Eventbrite)
+    # Use GPS from the user's latest activity if available
+    event_lat = None
+    event_lng = None
+    for a in acts:
+        if a.lat and a.lng:
+            event_lat = a.lat
+            event_lng = a.lng
+            break
+    event_activities = _external_events_as_activities(event_lat, event_lng, db, limit=3)
+    out.extend(event_activities)
 
     return schemas.ActivityListOut(activities=out)
 
