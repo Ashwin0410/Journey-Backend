@@ -371,9 +371,10 @@ def accept_tos(
     Record user's acceptance of the Terms of Service.
     Called after user reads and clicks "I Accept" on the ToS screen.
     """
-    user = current_user
+    # Re-fetch user within this session to avoid detached instance error
+    user = db.query(models.Users).filter(models.Users.user_hash == current_user.user_hash).first()
     
-    if user.deleted_at is not None:
+    if not user or user.deleted_at is not None:
         raise HTTPException(status_code=401, detail="Account not found.")
     
     user.tos_accepted_at = datetime.utcnow()
@@ -384,7 +385,6 @@ def accept_tos(
         "status": "accepted",
         "tos_accepted_at": user.tos_accepted_at.isoformat() if user.tos_accepted_at else None,
     }
-
 
 # ============================================================================
 # EMAIL/PASSWORD AUTHENTICATION ENDPOINTS (NEW)
