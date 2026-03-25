@@ -125,6 +125,23 @@ def subscribe(
         user_agent=user_agent,
     )
     
+    # Issue #3: Send a welcome notification immediately so user sees it works
+    try:
+        push_service.send_push_to_user(
+            db=q,
+            user_hash=user_hash,
+            title="Welcome to ReWire",
+            body="Notifications are on. We'll let you know when your daily video is ready.",
+            tag="welcome",
+            url="/",
+            data={
+                "type": "welcome",
+            },
+        )
+        print(f"[notifications] Sent welcome notification to user {user_hash}")
+    except Exception as e:
+        print(f"[notifications] Welcome notification failed (non-blocking): {e}")
+    
     return {
         "ok": True,
         "subscription_id": subscription.id,
