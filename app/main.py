@@ -512,6 +512,86 @@ def run_migrations():
                 conn.commit()
                 print("[migration] Created phq9_assessments table")
             
+            # -----------------------------------------------------------------
+            # Migration 11: Add ToS + Stripe columns to users table
+            # -----------------------------------------------------------------
+            # Re-read user columns (may have changed from earlier migrations)
+            result = conn.execute(text("PRAGMA table_info(users)"))
+            user_columns = [row[1] for row in result.fetchall()]
+            
+            if 'tos_accepted_at' not in user_columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN tos_accepted_at DATETIME"))
+                conn.commit()
+                print("[migration] Added tos_accepted_at column to users table")
+            
+            if 'stripe_customer_id' not in user_columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN stripe_customer_id TEXT"))
+                conn.commit()
+                print("[migration] Added stripe_customer_id column to users table")
+            
+            # Check if index exists for stripe_customer_id
+            result = conn.execute(text("SELECT name FROM sqlite_master WHERE type='index' AND name='ix_users_stripe_customer_id'"))
+            if not result.fetchone():
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_stripe_customer_id ON users (stripe_customer_id)"))
+                conn.commit()
+                print("[migration] Created index ix_users_stripe_customer_id")
+            
+            if 'subscription_id' not in user_columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN subscription_id TEXT"))
+                conn.commit()
+                print("[migration] Added subscription_id column to users table")
+            
+            if 'subscription_status' not in user_columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN subscription_status TEXT"))
+                conn.commit()
+                print("[migration] Added subscription_status column to users table")
+            
+            # Check if index exists for subscription_status
+            result = conn.execute(text("SELECT name FROM sqlite_master WHERE type='index' AND name='ix_users_subscription_status'"))
+            if not result.fetchone():
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_subscription_status ON users (subscription_status)"))
+                conn.commit()
+                print("[migration] Created index ix_users_subscription_status")
+            
+            # -----------------------------------------------------------------
+            # Migration 12: Create external_events table (Eventbrite cache)
+            # -----------------------------------------------------------------
+            result = conn.execute(text(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='external_events'"
+            ))
+            if not result.fetchone():
+                conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS external_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        source TEXT NOT NULL,
+                        external_id TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        description TEXT,
+                        url TEXT NOT NULL,
+                        image_url TEXT,
+                        venue_name TEXT,
+                        address TEXT,
+                        city TEXT,
+                        lat REAL,
+                        lng REAL,
+                        start_time DATETIME,
+                        end_time DATETIME,
+                        category TEXT,
+                        is_free BOOLEAN DEFAULT 0,
+                        price_text TEXT,
+                        fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        expires_at DATETIME,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_external_events_source ON external_events (source)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_external_events_external_id ON external_events (external_id)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_external_events_city ON external_events (city)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_external_events_start_time ON external_events (start_time)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_external_events_category ON external_events (category)"))
+                conn.commit()
+                print("[migration] Created external_events table")
+            
             print("[migration] All migrations completed successfully")
             
     except Exception as e:
@@ -648,6 +728,11 @@ from app.routes.admin_auth import r as admin_auth_r
 from app.routes.admin_dashboard import r as admin_dashboard_r
 # ML Video Refactor: Chills tracking routes
 from app.routes.chills import r as chills_r
+# Stripe Payments (Issue #2 - Paywall)
+try:
+    from app.routes.payments import r as payments_r
+except Exception:
+    payments_r = None
 
 app.include_router(health_r)
 app.include_router(journey_r)
@@ -676,3 +761,6 @@ app.include_router(admin_auth_r)
 app.include_router(admin_dashboard_r)
 # ML Video Refactor: Chills tracking router
 app.include_router(chills_r)
+# Stripe Payments Router (Issue #2 - Paywall)
+if payments_r is not None:
+    app.include_router(payments_r)
