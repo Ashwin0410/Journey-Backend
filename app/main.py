@@ -484,6 +484,34 @@ def run_migrations():
             except Exception as seed_err:
                 print(f"[migration] Error seeding video_stimuli (non-fatal): {seed_err}")
             
+            # -----------------------------------------------------------------
+            # Migration 10: Create phq9_assessments table (Issue #10)
+            # Recurring PHQ-9 health checks every 6 days
+            # -----------------------------------------------------------------
+            result = conn.execute(text(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='phq9_assessments'"
+            ))
+            if not result.fetchone():
+                conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS phq9_assessments (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_hash TEXT NOT NULL,
+                        assessment_type TEXT DEFAULT 'recurring',
+                        scores_json TEXT NOT NULL,
+                        total_score INTEGER NOT NULL,
+                        severity TEXT,
+                        q9_flagged BOOLEAN DEFAULT 0,
+                        q9_score INTEGER,
+                        notes TEXT,
+                        journey_day INTEGER,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_phq9_assessments_user_hash ON phq9_assessments (user_hash)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_phq9_assessments_type ON phq9_assessments (assessment_type)"))
+                conn.commit()
+                print("[migration] Created phq9_assessments table")
+            
             print("[migration] All migrations completed successfully")
             
     except Exception as e:
@@ -492,6 +520,104 @@ def run_migrations():
         traceback.print_exc()
 
 run_migrations()
+# =============================================================================
+
+
+# =============================================================================
+# BACKGROUND SCHEDULER: Daily Push Notifications (Issue #1)
+# =============================================================================
+# Sends "Your daily video is ready!" to all users with active push subscriptions.
+# Runs once daily. Uses a background thread so it doesn't block the server.
+# =============================================================================
+
+def _start_daily_notification_scheduler():
+    """
+    Start a background scheduler that sends daily push notifications.
+    
+    Issue #1: Users need to receive "Your daily video is ready!" notifications.
+    
+    Uses threading + schedule approach (lightweight, no extra dependencies).
+    The scheduler runs in a daemon thread so it dies when the server stops.
+    """
+    import threading
+    import time
+    
+    DAILY_NOTIFICATION_HOUR = 8  # 8 AM UTC (adjust for your timezone)
+    
+    def _run_daily_notifications():
+        """Execute the daily notification broadcast."""
+        print("[scheduler] Running daily notification broadcast...")
+        try:
+            from app.db import SessionLocal
+            from app.services.push import send_daily_notifications_to_all
+            
+            db = SessionLocal()
+            try:
+                result = send_daily_notifications_to_all(db)
+                print(f"[scheduler] Daily notifications result: {result}")
+            finally:
+                db.close()
+        except Exception as e:
+            print(f"[scheduler] Daily notification error: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _scheduler_loop():
+        """
+        Background loop that checks once per hour if it's time to send.
+        
+        Simple approach: check every 60 minutes if current hour matches
+        the target hour. If yes, send notifications (with a flag to prevent
+        double-send within the same day).
+        """
+        from datetime import datetime, date
+        
+        last_sent_date = None
+        
+        print(f"[scheduler] Daily notification scheduler started (target hour: {DAILY_NOTIFICATION_HOUR} UTC)")
+        
+        # Wait 30 seconds after startup before first check
+        time.sleep(30)
+        
+        while True:
+            try:
+                now = datetime.utcnow()
+                today = now.date()
+                
+                # Send if: correct hour AND haven't sent today
+                if now.hour >= DAILY_NOTIFICATION_HOUR and last_sent_date != today:
+                    print(f"[scheduler] Time to send daily notifications (hour={now.hour}, date={today})")
+                    _run_daily_notifications()
+                    last_sent_date = today
+                
+            except Exception as e:
+                print(f"[scheduler] Scheduler loop error: {e}")
+            
+            # Check every 30 minutes
+            time.sleep(1800)
+    
+    # Start scheduler in a daemon thread
+    try:
+        scheduler_thread = threading.Thread(
+            target=_scheduler_loop,
+            name="daily-notification-scheduler",
+            daemon=True,  # Dies when main process exits
+        )
+        scheduler_thread.start()
+        print("[scheduler] Daily notification scheduler thread started")
+    except Exception as e:
+        print(f"[scheduler] Failed to start scheduler: {e}")
+
+
+# Only start scheduler if VAPID keys are configured (push notifications enabled)
+try:
+    from app.core.config import cfg
+    if cfg.VAPID_PUBLIC_KEY and cfg.VAPID_PRIVATE_KEY:
+        _start_daily_notification_scheduler()
+    else:
+        print("[scheduler] VAPID keys not configured, daily notifications disabled")
+except Exception as e:
+    print(f"[scheduler] Could not check VAPID config: {e}")
 # =============================================================================
 
 
