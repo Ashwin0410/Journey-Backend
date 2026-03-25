@@ -69,6 +69,19 @@ class Cfg(BaseSettings):
     VAPID_PRIVATE_KEY: Optional[str] = None
     VAPID_CLAIM_EMAIL: str = "mailto:hello@rewire.bio"
     
+    # =============================================================================
+    # Stripe: Payment / Subscription
+    # =============================================================================
+    STRIPE_SECRET_KEY: Optional[str] = None
+    STRIPE_PUBLISHABLE_KEY: Optional[str] = None
+    STRIPE_PRICE_ID: Optional[str] = None
+    STRIPE_WEBHOOK_SECRET: Optional[str] = None
+    
+    # =============================================================================
+    # Eventbrite: External event recommendations
+    # =============================================================================
+    EVENTBRITE_API_TOKEN: Optional[str] = None
+    
     @field_validator("CHILL_ROOT", "OUT_DIR", mode="before")
     @classmethod
     def _norm_paths(cls, v: str) -> str:
